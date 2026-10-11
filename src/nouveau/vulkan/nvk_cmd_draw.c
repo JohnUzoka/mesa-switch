@@ -39,6 +39,72 @@
 #include "clcd97.h"
 #include "drf.h"
 
+#ifdef HAVE_SWITCH_PLATFORM
+#include "util/u_atomic.h"
+
+/* bevy-horizon's measurement switches (patches/mesa-switch/0008): settings a
+ * game changes between frames to time the GPU with and without them. -1, the
+ * default, leaves NVK as it is. They are read as each render pass begins and
+ * as each fragment shader is bound. The two methods emitted at a render
+ * pass's start are context state: the GPU keeps the last value set until
+ * another one is.
+ */
+enum nvk_switch_tune {
+   /* SET_OPPORTUNISTIC_EARLY_Z_HYSTERESIS: 0 (INSTANTANEOUS), 1-19 (an
+    * accumulated area of 16 << (n - 1) pixels) or 31 (LATEZ_ALWAYS).
+    */
+   NVK_SWITCH_TUNE_EARLY_Z_HYSTERESIS,
+   /* 0: no render pass uses ZCULL. */
+   NVK_SWITCH_TUNE_ZCULL,
+   /* SET_ZCULL_SERIALIZATION: ENABLE in bit 0, APPLIED in bits 4-5. */
+   NVK_SWITCH_TUNE_ZCULL_SERIALIZATION,
+   /* SET_API_MANDATED_EARLY_Z after each fragment shader's own: 0 or 1. */
+   NVK_SWITCH_TUNE_EARLY_Z,
+   NVK_SWITCH_TUNE_COUNT,
+};
+
+static int32_t nvk_switch_tune_values[NVK_SWITCH_TUNE_COUNT] = {
+   -1, -1, -1, -1,
+};
+
+bool nouveau_horizon_tune(uint32_t knob, int32_t value);
+
+/* Sets one switch; false, changing nothing, for an unknown one or a value it
+ * can't take.
+ */
+bool
+nouveau_horizon_tune(uint32_t knob, int32_t value)
+{
+   bool valid;
+   switch (knob) {
+   case NVK_SWITCH_TUNE_EARLY_Z_HYSTERESIS:
+      valid = value == -1 || (value >= 0 && value <= 19) || value == 31;
+      break;
+   case NVK_SWITCH_TUNE_ZCULL:
+      valid = value == -1 || value == 0;
+      break;
+   case NVK_SWITCH_TUNE_ZCULL_SERIALIZATION:
+      valid = value == -1 || (value >= 0 && (value & ~0x31) == 0);
+      break;
+   case NVK_SWITCH_TUNE_EARLY_Z:
+      valid = value == -1 || value == 0 || value == 1;
+      break;
+   default:
+      valid = false;
+      break;
+   }
+   if (valid)
+      p_atomic_set(&nvk_switch_tune_values[knob], value);
+   return valid;
+}
+
+static inline int32_t
+nvk_switch_tune(enum nvk_switch_tune knob)
+{
+   return p_atomic_read(&nvk_switch_tune_values[knob]);
+}
+#endif
+
 static inline uint16_t
 nvk_cmd_buffer_3d_cls(struct nvk_cmd_buffer *cmd)
 {
@@ -1553,6 +1619,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 #ifdef HAVE_SWITCH_PLATFORM
    use_zcull &= zcull_image != NULL &&
                 (zcull_plane != NULL || zcull_image->zcull.transient_eligible);
+   use_zcull &= nvk_switch_tune(NVK_SWITCH_TUNE_ZCULL) != 0;
 #endif
    render->zcull_enabled = use_zcull;
 
@@ -1768,6 +1835,25 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
             break;
       }
    }
+
+#ifdef HAVE_SWITCH_PLATFORM
+   const int32_t hysteresis =
+      nvk_switch_tune(NVK_SWITCH_TUNE_EARLY_Z_HYSTERESIS);
+   const int32_t serialization =
+      nvk_switch_tune(NVK_SWITCH_TUNE_ZCULL_SERIALIZATION);
+   if (hysteresis >= 0 || serialization >= 0) {
+      p = nvk_cmd_buffer_push(cmd, 4);
+      if (hysteresis >= 0) {
+         P_IMMD(p, NV9097, SET_OPPORTUNISTIC_EARLY_Z_HYSTERESIS, hysteresis);
+      }
+      if (serialization >= 0 && nvk_cmd_buffer_3d_cls(cmd) >= MAXWELL_B) {
+         P_IMMD(p, NVB197, SET_ZCULL_SERIALIZATION, {
+            .enable = serialization & 1,
+            .applied = (serialization >> 4) & 3,
+         });
+      }
+   }
+#endif
 
    if (render->flags & VK_RENDERING_RESUMING_BIT)
       return;
@@ -2408,6 +2494,13 @@ nvk_cmd_flush_gfx_shaders(struct nvk_cmd_buffer *cmd)
       } else {
          struct nv_push *p = nvk_cmd_buffer_push(cmd, shader->push_dw_count);
          nv_push_raw(p, shader->push_dw, shader->push_dw_count);
+#ifdef HAVE_SWITCH_PLATFORM
+         const int32_t early_z = nvk_switch_tune(NVK_SWITCH_TUNE_EARLY_Z);
+         if (type == NV9097_SET_PIPELINE_SHADER_TYPE_PIXEL && early_z >= 0) {
+            p = nvk_cmd_buffer_push(cmd, 2);
+            P_IMMD(p, NV9097, SET_API_MANDATED_EARLY_Z, early_z);
+         }
+#endif
       }
    }
 
