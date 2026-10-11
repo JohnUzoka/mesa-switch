@@ -29,6 +29,8 @@ enum DebugFlags {
     NoUgpr,
     Cycles,
     Stats,
+    XBar,
+    Final,
 }
 
 pub struct Debug {
@@ -56,6 +58,8 @@ impl Debug {
                 "nougpr" => flags |= 1 << DebugFlags::NoUgpr as u8,
                 "cycles" => flags |= 1 << DebugFlags::Cycles as u8,
                 "stats" => flags |= 1 << DebugFlags::Stats as u8,
+                "xbar" => flags |= 1 << DebugFlags::XBar as u8,
+                "final" => flags |= 1 << DebugFlags::Final as u8,
                 unk => eprintln!("Unknown NAK_DEBUG flag \"{}\"", unk),
             }
         }
@@ -96,6 +100,14 @@ pub trait GetDebugFlags {
 
     fn stats(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::Stats as u8) != 0
+    }
+
+    fn xbar(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::XBar as u8) != 0
+    }
+
+    fn final_ir(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::Final as u8) != 0
     }
 }
 
@@ -554,15 +566,24 @@ fn nak_compile_shader_internal(
     // NAK_DEBUG=stats: one line per shader, without the IR that "print" also
     // writes, which on a slow CPU makes a large shader take minutes to build.
     let mut op_counts = [0u32; 6];
+    let mut wait_counts = [0u32; 2];
     if DEBUG.stats() {
-        s.for_each_instr(&mut |i| match &i.op {
-            Op::Tex(_) => op_counts[0] += 1,
-            Op::Txd(_) => op_counts[1] += 1,
-            Op::Tld(_) | Op::Tld4(_) => op_counts[2] += 1,
-            Op::Ld(_) | Op::Ldc(_) => op_counts[3] += 1,
-            Op::Ipa(_) => op_counts[4] += 1,
-            Op::Bra(_) => op_counts[5] += 1,
-            _ => {}
+        s.for_each_instr(&mut |i| {
+            if i.deps.wt_bar_mask != 0 {
+                wait_counts[0] += 1;
+                if i.is_branch() {
+                    wait_counts[1] += 1;
+                }
+            }
+            match &i.op {
+                Op::Tex(_) => op_counts[0] += 1,
+                Op::Txd(_) => op_counts[1] += 1,
+                Op::Tld(_) | Op::Tld4(_) => op_counts[2] += 1,
+                Op::Ld(_) | Op::Ldc(_) => op_counts[3] += 1,
+                Op::Ipa(_) => op_counts[4] += 1,
+                Op::Bra(_) => op_counts[5] += 1,
+                _ => {}
+            }
         });
     }
 
@@ -573,7 +594,7 @@ fn nak_compile_shader_internal(
 
     let code = sm.encode_shader(&s);
     let bin = Box::new(ShaderBin::new(&sm, &s.info, fs_key, code, &asm));
-    if DEBUG.stats() {
+    if DEBUG.stats() || DEBUG.final_ir() {
         let info = &bin.bin.info;
         let stage = unsafe {
             CStr::from_ptr(_mesa_shader_stage_to_string(info.stage as u32))
@@ -584,28 +605,52 @@ fn nak_compile_shader_internal(
             unsafe { CStr::from_ptr(nir.info.name) }.to_string_lossy()
         };
         let hash = &nir.info.source_blake3;
-        let [tex, txd, tld, ld, ipa, bra] = op_counts;
-        eprintln!(
-            "NAK_STATS stage={} instrs={} static_cycles={} max_warps={} \
-             gprs={} slm={} spills_mem={} fills_mem={} spills_reg={} \
-             fills_reg={} tex={tex} txd={txd} tld={tld} ld={ld} ipa={ipa} \
-             bra={bra} source={:02x}{:02x}{:02x}{:02x} name={}",
-            stage.to_string_lossy(),
-            info.num_instrs,
-            info.num_static_cycles,
-            info.max_warps_per_sm,
-            info.num_gprs,
-            info.slm_size,
-            info.num_spills_to_mem,
-            info.num_fills_from_mem,
-            info.num_spills_to_reg,
-            info.num_fills_from_reg,
-            hash[0],
-            hash[1],
-            hash[2],
-            hash[3],
-            name,
-        );
+        // NAK_DEBUG=final: the shader as encoded, each instruction with the
+        // scoreboards it sets (rd:, wr:) and waits on (wt=), and none of the
+        // passes before it that "print" also writes. Formatted first and
+        // written in one call, so that other threads' lines stay outside it.
+        if DEBUG.final_ir() {
+            let text = format!(
+                "NAK_FINAL begin stage={} instrs={} gprs={} \
+                 source={:02x}{:02x}{:02x}{:02x} name={}\n{}NAK_FINAL end",
+                stage.to_string_lossy(),
+                info.num_instrs,
+                info.num_gprs,
+                hash[0],
+                hash[1],
+                hash[2],
+                hash[3],
+                name,
+                s,
+            );
+            eprintln!("{}", text);
+        }
+        if DEBUG.stats() {
+            let [tex, txd, tld, ld, ipa, bra] = op_counts;
+            let [waits, bra_waits] = wait_counts;
+            eprintln!(
+                "NAK_STATS stage={} instrs={} static_cycles={} max_warps={} \
+                 gprs={} slm={} spills_mem={} fills_mem={} spills_reg={} \
+                 fills_reg={} tex={tex} txd={txd} tld={tld} ld={ld} ipa={ipa} \
+                 bra={bra} waits={waits} bra_waits={bra_waits} \
+                 source={:02x}{:02x}{:02x}{:02x} name={}",
+                stage.to_string_lossy(),
+                info.num_instrs,
+                info.num_static_cycles,
+                info.max_warps_per_sm,
+                info.num_gprs,
+                info.slm_size,
+                info.num_spills_to_mem,
+                info.num_fills_from_mem,
+                info.num_spills_to_reg,
+                info.num_fills_from_reg,
+                hash[0],
+                hash[1],
+                hash[2],
+                hash[3],
+                name,
+            );
+        }
     }
     Box::into_raw(bin) as *mut nak_shader_bin
 }
