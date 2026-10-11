@@ -100,6 +100,10 @@ struct nvk_zcull_plane {
     * read and written with p_atomic_*.
     */
    uint32_t zdir;
+   /* The kinds of pass on this image the Switch's ZCULL report has printed
+    * (patches/mesa-switch/0010), one bit each; p_atomic_* too.
+    */
+   uint32_t reported;
 };
 
 struct nvk_image {

@@ -40,6 +40,8 @@
 #include "drf.h"
 
 #ifdef HAVE_SWITCH_PLATFORM
+#include <stdio.h>
+
 #include "util/u_atomic.h"
 
 /* bevy-horizon's measurement switches (patches/mesa-switch/0008): settings a
@@ -1274,6 +1276,143 @@ nvk_get_zcull_image(const struct nvk_rendering_state *render)
    return (struct nvk_image *)iview->vk.image;
 }
 
+#ifdef HAVE_SWITCH_PLATFORM
+/* bevy-horizon (patches/mesa-switch/0010): nothing else shows whether a
+ * depth pass uses ZCULL, so stderr, which the game's log keeps, says so a
+ * few times a run.  For each depth image: the first pass with ZCULL that
+ * loads it, the first that clears it and the first of another kind, and
+ * the first pass without ZCULL and why.  Then each change of direction:
+ * 48 lines in all.  And the first 8 loads a change turns into clears.
+ */
+static int32_t nvk_switch_zcull_lines = 48;
+static int32_t nvk_switch_zcull_guard_lines = 8;
+static uint32_t nvk_switch_zcull_dir_seen = UINT32_MAX;
+
+static const char *
+nvk_switch_zdir_name(uint32_t zdir)
+{
+   return zdir == NV9097_SET_ZCULL_DIR_FORMAT_ZDIR_GREATER ?
+          "GREATER" : "LESS";
+}
+
+static const char *
+nvk_switch_load_op_name(VkAttachmentLoadOp load_op)
+{
+   switch (load_op) {
+   case VK_ATTACHMENT_LOAD_OP_LOAD:
+      return "loads";
+   case VK_ATTACHMENT_LOAD_OP_CLEAR:
+      return "clears";
+   case VK_ATTACHMENT_LOAD_OP_DONT_CARE:
+      return "discards";
+   default:
+      return "ignores";
+   }
+}
+
+/* True for the caller that sets bit in *bits. */
+static bool
+nvk_switch_zcull_first(uint32_t *bits, uint32_t bit)
+{
+   uint32_t old = p_atomic_read(bits);
+   while (!(old & bit)) {
+      const uint32_t seen = p_atomic_cmpxchg(bits, old, old | bit);
+      if (seen == old)
+         return true;
+      old = seen;
+   }
+   return false;
+}
+
+static void
+nvk_switch_zcull_report(const struct nvk_physical_device *pdev,
+                        const struct nvk_rendering_state *render,
+                        const struct nvk_image *zcull_image,
+                        bool use_zcull, uint32_t zdir,
+                        VkAttachmentLoadOp load_op)
+{
+   struct nvk_image *image =
+      (struct nvk_image *)render->depth_att.iview->vk.image;
+   const struct nvk_zcull_plane *plane = &image->zcull;
+
+   if (use_zcull && p_atomic_read(&nvk_switch_zcull_dir_seen) != zdir) {
+      const uint32_t prev = p_atomic_xchg(&nvk_switch_zcull_dir_seen, zdir);
+      if (prev != UINT32_MAX && prev != zdir &&
+          p_atomic_dec_return(&nvk_switch_zcull_lines) >= 0)
+         fprintf(stderr, "[NVK] ZCULL: passes now use %s, not %s\n",
+                 nvk_switch_zdir_name(zdir), nvk_switch_zdir_name(prev));
+   }
+
+   const uint32_t kind = !use_zcull ? 1u << 3 :
+      load_op == VK_ATTACHMENT_LOAD_OP_LOAD ? 1u << 0 :
+      load_op == VK_ATTACHMENT_LOAD_OP_CLEAR ? 1u << 1 : 1u << 2;
+   if (!nvk_switch_zcull_first(&image->zcull.reported, kind) ||
+       p_atomic_dec_return(&nvk_switch_zcull_lines) < 0)
+      return;
+
+   if (use_zcull && plane->addr != 0) {
+      fprintf(stderr, "[NVK] ZCULL on, %s: a %ux%u pass %s a %ux%u depth "
+              "image, whose saved ZCULL is %u bytes\n",
+              nvk_switch_zdir_name(zdir),
+              render->area.extent.width, render->area.extent.height,
+              nvk_switch_load_op_name(load_op),
+              image->vk.extent.width, image->vk.extent.height,
+              plane->nil.size_B);
+   } else if (use_zcull) {
+      fprintf(stderr, "[NVK] ZCULL on, %s: a %ux%u pass %s a %ux%u depth "
+              "image, which has nowhere to save ZCULL, so it lasts the "
+              "pass\n",
+              nvk_switch_zdir_name(zdir),
+              render->area.extent.width, render->area.extent.height,
+              nvk_switch_load_op_name(load_op),
+              image->vk.extent.width, image->vk.extent.height);
+   } else {
+      /* In the order nvk_CmdBeginRendering tests them. */
+      const char *why =
+         !pdev->info.has_zcull_info ?
+            "nvhost's ZCULL description was rejected" :
+         zcull_image == NULL ?
+            "the view isn't the whole image (layered, multiview, linear, "
+            "or not level 0 and layer 0)" :
+         plane->addr == 0 && !plane->transient_eligible ?
+            "the image has nowhere to save ZCULL and can't use it within "
+            "a pass" :
+         plane->addr == 0 && load_op != VK_ATTACHMENT_LOAD_OP_CLEAR ?
+            "the image has nowhere to save ZCULL and the pass doesn't "
+            "clear it" :
+         nvk_switch_tune(NVK_SWITCH_TUNE_ZCULL) == 0 ?
+            "the zcull switch is 0" : "no reason found";
+      fprintf(stderr, "[NVK] ZCULL off: a %ux%u pass %s a %ux%u depth "
+              "image (%u levels, %u layers, usage 0x%x, saved ZCULL %u "
+              "bytes%s): %s\n",
+              render->area.extent.width, render->area.extent.height,
+              nvk_switch_load_op_name(load_op),
+              image->vk.extent.width, image->vk.extent.height,
+              image->vk.mip_levels, image->vk.array_layers,
+              (unsigned)image->vk.usage, plane->nil.size_B,
+              plane->nil.size_B > 0 && plane->addr == 0 ? ", unbound" : "",
+              why);
+   }
+}
+
+/* A load of ZCULL saved with the other direction, cleared instead. */
+static void
+nvk_switch_zcull_report_guard(const struct nvk_rendering_state *render,
+                              uint32_t zdir, float depth)
+{
+   if (p_atomic_dec_return(&nvk_switch_zcull_guard_lines) < 0)
+      return;
+   fprintf(stderr, "[NVK] ZCULL: a %ux%u pass would load ZCULL saved with "
+           "%s; it uses %s, so it clears it to %.1f instead\n",
+           render->area.extent.width, render->area.extent.height,
+           nvk_switch_zdir_name(
+              zdir == NV9097_SET_ZCULL_DIR_FORMAT_ZDIR_GREATER ?
+              NV9097_SET_ZCULL_DIR_FORMAT_ZDIR_LESS :
+              NV9097_SET_ZCULL_DIR_FORMAT_ZDIR_GREATER),
+           nvk_switch_zdir_name(zdir), depth);
+}
+#endif
+
 static uint32_t
 nvk_vk_format_to_zcull_format(VkFormat format) {
    switch (format) {
@@ -1637,6 +1776,11 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    const uint32_t zdir = NV9097_SET_ZCULL_DIR_FORMAT_ZDIR_LESS;
 #endif
    render->zcull_enabled = use_zcull;
+#ifdef HAVE_SWITCH_PLATFORM
+   if (render->depth_att.iview != NULL)
+      nvk_switch_zcull_report(pdev, render, zcull_image, use_zcull, zdir,
+                              pRenderingInfo->pDepthAttachment->loadOp);
+#endif
 
    if (use_zcull) {
       uint32_t start_count = nv_push_dw_count(p);
@@ -1842,6 +1986,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
             load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             depth = zdir == NV9097_SET_ZCULL_DIR_FORMAT_ZDIR_GREATER ?
                     0.0f : 1.0f;
+            nvk_switch_zcull_report_guard(render, zdir, depth);
          }
          if (load_op != VK_ATTACHMENT_LOAD_OP_LOAD)
             p_atomic_set(&zcull_plane->zdir, zdir);

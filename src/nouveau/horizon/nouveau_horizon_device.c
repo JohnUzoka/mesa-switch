@@ -12,6 +12,7 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 
 #define NOUVEAU_HORIZON_CLS_ENG3D 0xb197
@@ -61,6 +62,43 @@ nouveau_horizon_get_gm20b_info(struct nv_device_info *info_out)
    info_out->nc_atom_size_B = 128;
 }
 
+/* bevy-horizon (patches/mesa-switch/0010): nothing else shows whether
+ * nvhost's ZCULL description passed the checks below, so stderr, which the
+ * game's log keeps, says so for the first two devices.
+ */
+static void
+nouveau_horizon_report_zcull_info(const nvioctl_zcull_info *zcull,
+                                  uint32_t ctxsw_size, bool accepted)
+{
+   static uint32_t reports;
+   if (p_atomic_inc_return(&reports) > 2)
+      return;
+
+   if (zcull == NULL) {
+      fprintf(stderr, "[NVK] ZCULL: nvhost gave no description, so no "
+              "render pass uses ZCULL\n");
+      return;
+   }
+   fprintf(stderr, "[NVK] ZCULL: nvhost's description was %s: "
+           "width_align_pixels %u, height_align_pixels %u, "
+           "pixel_squares_by_aliquots %u, aliquot_total %u, "
+           "region_byte_multiplier %u, region_header_size %u, "
+           "subregion_header_size %u, subregion_width_align_pixels %u, "
+           "subregion_height_align_pixels %u, subregion_count %u, "
+           "context size %u\n",
+           accepted ? "accepted" : "rejected, so no render pass uses ZCULL",
+           (unsigned)zcull->width_align_pixels,
+           (unsigned)zcull->height_align_pixels,
+           (unsigned)zcull->pixel_squares_by_aliquots,
+           (unsigned)zcull->aliquot_total,
+           (unsigned)zcull->region_byte_multiplier,
+           (unsigned)zcull->region_header_size,
+           (unsigned)zcull->subregion_header_size,
+           (unsigned)zcull->subregion_width_align_pixels,
+           (unsigned)zcull->subregion_height_align_pixels,
+           (unsigned)zcull->subregion_count, (unsigned)ctxsw_size);
+}
+
 void
 nouveau_horizon_add_zcull_info(struct nv_device_info *info_out)
 {
@@ -88,14 +126,18 @@ nouveau_horizon_add_zcull_info(struct nv_device_info *info_out)
        zcull->subregion_height_align_pixels > UINT16_MAX ||
        zcull->region_byte_multiplier == 0 ||
        (zcull->region_byte_multiplier & 3) != 0 ||
-       ((zcull->region_header_size | zcull->subregion_header_size) & 3) != 0)
+       ((zcull->region_header_size | zcull->subregion_header_size) & 3) != 0) {
+      nouveau_horizon_report_zcull_info(zcull, ctxsw_size, false);
       return;
+   }
 
    const uint64_t max_size_B =
       (uint64_t)zcull->aliquot_total * zcull->region_byte_multiplier +
       zcull->region_header_size + zcull->subregion_header_size;
-   if (max_size_B > UINT32_MAX)
+   if (max_size_B > UINT32_MAX) {
+      nouveau_horizon_report_zcull_info(zcull, ctxsw_size, false);
       return;
+   }
 
    info_out->zcull_info = (struct nv_zcull_device_info) {
       .width_align_pixels = zcull->width_align_pixels,
@@ -115,6 +157,7 @@ nouveau_horizon_add_zcull_info(struct nv_device_info *info_out)
       .ctxsw_align = 0x1000,
    };
    info_out->has_zcull_info = true;
+   nouveau_horizon_report_zcull_info(zcull, ctxsw_size, true);
 }
 
 static uint32_t
