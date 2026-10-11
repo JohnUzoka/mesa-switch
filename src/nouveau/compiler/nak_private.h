@@ -16,6 +16,8 @@ extern "C" {
 
 bool nak_should_print_nir(void);
 bool nak_debug_no_ugpr(void);
+bool nak_debug_sink(void);
+bool nak_debug_remat(void);
 
 struct nak_compiler {
    uint8_t sm;
@@ -438,6 +440,7 @@ nak_const_offsets(const struct nak_compiler* nak, bool is_graphics)
    }
 }
 
+bool nak_nir_rematerialize_bools(nir_shader *nir);
 bool nak_nir_rematerialize_load_const(nir_shader *nir);
 bool nak_nir_mark_lcssa_invariants(nir_shader *nir);
 bool nak_nir_lower_non_uniform_ldcx(nir_shader *nir, const struct nak_compiler *nak);

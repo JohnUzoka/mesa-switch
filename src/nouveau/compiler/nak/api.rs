@@ -31,6 +31,8 @@ enum DebugFlags {
     Stats,
     XBar,
     Final,
+    Sink,
+    Remat,
 }
 
 pub struct Debug {
@@ -60,6 +62,8 @@ impl Debug {
                 "stats" => flags |= 1 << DebugFlags::Stats as u8,
                 "xbar" => flags |= 1 << DebugFlags::XBar as u8,
                 "final" => flags |= 1 << DebugFlags::Final as u8,
+                "sink" => flags |= 1 << DebugFlags::Sink as u8,
+                "remat" => flags |= 1 << DebugFlags::Remat as u8,
                 unk => eprintln!("Unknown NAK_DEBUG flag \"{}\"", unk),
             }
         }
@@ -109,6 +113,14 @@ pub trait GetDebugFlags {
     fn final_ir(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::Final as u8) != 0
     }
+
+    fn sink(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::Sink as u8) != 0
+    }
+
+    fn remat(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::Remat as u8) != 0
+    }
 }
 
 pub static DEBUG: OnceLock<Debug> = OnceLock::new();
@@ -127,6 +139,16 @@ pub extern "C" fn nak_should_print_nir() -> bool {
 #[no_mangle]
 pub extern "C" fn nak_debug_no_ugpr() -> bool {
     DEBUG.no_ugpr()
+}
+
+#[no_mangle]
+pub extern "C" fn nak_debug_sink() -> bool {
+    DEBUG.sink()
+}
+
+#[no_mangle]
+pub extern "C" fn nak_debug_remat() -> bool {
+    DEBUG.remat()
 }
 
 fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {

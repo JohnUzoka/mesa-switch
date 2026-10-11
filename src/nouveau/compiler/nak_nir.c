@@ -1820,6 +1820,15 @@ nak_postprocess_nir(nir_shader *nir,
           type_size_vec4, nir_lower_io_lower_64bit_to_32_new |
           nir_lower_io_use_interpolated_input_intrinsics);
       OPT(nir, nir_opt_constant_folding);
+      /* NAK_DEBUG=sink: interpolate each input where it is first used
+       * instead of at the top of the shader, so it isn't live across work
+       * that doesn't need it.  An IPA gives the same result wherever it
+       * runs (discard is a demote here), so this changes no output.
+       */
+      if (nak_debug_sink()) {
+         OPT(nir, nir_opt_sink, nir_move_load_input | nir_move_load_frag_coord);
+         OPT(nir, nir_opt_move, nir_move_load_input | nir_move_load_frag_coord);
+      }
       OPT(nir, nak_nir_lower_fs_inputs, nak, fs_key);
       OPT(nir, nak_nir_lower_fs_outputs);
       break;
@@ -1907,6 +1916,13 @@ nak_postprocess_nir(nir_shader *nir,
          OPT(nir, nir_opt_cse);
       }
    } while (progress);
+
+   /* NAK_DEBUG=remat: clone compares into the blocks that use them, so a
+    * switch keeps its selector live rather than one predicate per case.
+    * Nothing after this point runs CSE, which would merge the clones again.
+    */
+   if (nak_debug_remat() && OPT(nir, nak_nir_rematerialize_bools))
+      OPT(nir, nir_opt_dce);
 
    OPT(nir, nir_opt_move, nir_move_comparisons | nir_move_load_ubo);
 
