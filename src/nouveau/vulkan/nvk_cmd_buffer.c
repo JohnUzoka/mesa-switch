@@ -699,8 +699,15 @@ nvk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
     * dirty tracking, we may miss the fact that a secondary has messed with
     * GPU state if we don't invalidate all our internal tracking.
    */
+   /* A query begun in the primary is still active after the secondaries, so
+    * its dispatches must keep adding compute invocations.
+    */
+   const bool active_compute_invocations_query =
+      cmd->state.cs.active_compute_invocations_query;
    nvk_cmd_invalidate_graphics_state(cmd);
    nvk_cmd_invalidate_compute_state(cmd);
+   cmd->state.cs.active_compute_invocations_query =
+      active_compute_invocations_query;
 }
 
 enum nvk_barrier {
