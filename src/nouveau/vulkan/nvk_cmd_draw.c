@@ -47,9 +47,9 @@
 /* bevy-horizon's measurement switches (patches/mesa-switch/0008): settings a
  * game changes between frames to time the GPU with and without them. -1, the
  * default, leaves NVK as it is. They are read as each render pass begins and
- * as each fragment shader is bound. The two methods emitted at a render
- * pass's start are context state: the GPU keeps the last value set until
- * another one is.
+ * as each fragment shader is bound, and SKIP_EMPTY_DRAWS as each indirect draw
+ * is recorded. The two methods emitted at a render pass's start are context
+ * state: the GPU keeps the last value set until another one is.
  */
 enum nvk_switch_tune {
    /* SET_OPPORTUNISTIC_EARLY_Z_HYSTERESIS: 0 (INSTANTANEOUS), 1-19 (an
@@ -67,11 +67,15 @@ enum nvk_switch_tune {
     * tested GREATER or GEQUAL).
     */
    NVK_SWITCH_TUNE_ZCULL_DIR,
+   /* 0: indirect draws set up every draw, as NVK does without
+    * patches/mesa-switch/0012, rather than skipping a draw with no instances.
+    */
+   NVK_SWITCH_TUNE_SKIP_EMPTY_DRAWS,
    NVK_SWITCH_TUNE_COUNT,
 };
 
 static int32_t nvk_switch_tune_values[NVK_SWITCH_TUNE_COUNT] = {
-   -1, -1, -1, -1, -1,
+   -1, -1, -1, -1, -1, -1,
 };
 
 bool nouveau_horizon_tune(uint32_t knob, int32_t value);
@@ -88,6 +92,7 @@ nouveau_horizon_tune(uint32_t knob, int32_t value)
       valid = value == -1 || (value >= 0 && value <= 19) || value == 31;
       break;
    case NVK_SWITCH_TUNE_ZCULL:
+   case NVK_SWITCH_TUNE_SKIP_EMPTY_DRAWS:
       valid = value == -1 || value == 0;
       break;
    case NVK_SWITCH_TUNE_ZCULL_SERIALIZATION:
@@ -5186,13 +5191,18 @@ nvk_mme_build_draw_loop(struct mme_builder *b,
 
 static void
 nvk_mme_build_draw(struct mme_builder *b,
-                   struct mme_value draw_index)
+                   struct mme_value draw_index,
+                   bool skip_empty)
 {
    /* These are in VkDrawIndirectCommand order */
    struct mme_value vertex_count = mme_load(b);
    struct mme_value instance_count = mme_load(b);
    struct mme_value first_vertex = mme_load(b);
    struct mme_value first_instance = mme_load(b);
+
+   /* See nvk_mme_build_draw_indirect_skip_empty() */
+   if (skip_empty)
+      mme_start_if_ine(b, instance_count, mme_zero());
 
    struct mme_draw_params params = {
       .first_vertex = first_vertex,
@@ -5241,13 +5251,16 @@ nvk_mme_build_draw(struct mme_builder *b,
 
    if (b->devinfo->cls_eng3d < TURING_A)
       nvk_mme_unspill(b, DRAW_IDX, draw_index);
+
+   if (skip_empty)
+      mme_end_if(b);
 }
 
 void
 nvk_mme_draw(struct mme_builder *b)
 {
    struct mme_value draw_index = mme_load(b);
-   nvk_mme_build_draw(b, draw_index);
+   nvk_mme_build_draw(b, draw_index, false);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -5360,7 +5373,8 @@ nvk_mme_build_draw_indexed_loop(struct mme_builder *b,
 
 static void
 nvk_mme_build_draw_indexed(struct mme_builder *b,
-                           struct mme_value draw_index)
+                           struct mme_value draw_index,
+                           bool skip_empty)
 {
    /* These are in VkDrawIndexedIndirectCommand order */
    struct mme_value index_count = mme_load(b);
@@ -5368,6 +5382,10 @@ nvk_mme_build_draw_indexed(struct mme_builder *b,
    struct mme_value first_index = mme_load(b);
    struct mme_value vertex_offset = mme_load(b);
    struct mme_value first_instance = mme_load(b);
+
+   /* See nvk_mme_build_draw_indirect_skip_empty() */
+   if (skip_empty)
+      mme_start_if_ine(b, instance_count, mme_zero());
 
    struct mme_draw_params params = {
       .base_vertex = vertex_offset,
@@ -5418,13 +5436,16 @@ nvk_mme_build_draw_indexed(struct mme_builder *b,
 
    if (b->devinfo->cls_eng3d < TURING_A)
       nvk_mme_unspill(b, DRAW_IDX, draw_index);
+
+   if (skip_empty)
+      mme_end_if(b);
 }
 
 void
 nvk_mme_draw_indexed(struct mme_builder *b)
 {
    struct mme_value draw_index = mme_load(b);
-   nvk_mme_build_draw_indexed(b, draw_index);
+   nvk_mme_build_draw_indexed(b, draw_index, false);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -5497,7 +5518,7 @@ nvk_mme_draw_indirect(struct mme_builder *b)
       mme_while(b, ult, draw, draw_count) {
          mme_tu104_read_fifoed(b, draw_addr, mme_imm(4));
 
-         nvk_mme_build_draw(b, draw);
+         nvk_mme_build_draw(b, draw, false);
 
          mme_add_to(b, draw, draw, mme_imm(1));
          mme_add64_to(b, draw_addr, draw_addr, stride);
@@ -5510,7 +5531,7 @@ nvk_mme_draw_indirect(struct mme_builder *b)
       mme_while(b, ine, draw, draw_count) {
          nvk_mme_spill(b, DRAW_COUNT, draw_count);
 
-         nvk_mme_build_draw(b, draw);
+         nvk_mme_build_draw(b, draw, false);
          mme_add_to(b, draw, draw, mme_imm(1));
 
          struct mme_value pad_dw = nvk_mme_load_scratch(b, DRAW_PAD_DW);
@@ -5566,6 +5587,11 @@ nvk_CmdDrawIndirect2KHR(VkCommandBuffer commandBuffer,
    } else {
 #ifdef HAVE_SWITCH_PLATFORM
       nvk_cmd_buffer_switch_mme_consumer(cmd);
+      const enum nvk_mme mme =
+         nvk_switch_tune(NVK_SWITCH_TUNE_SKIP_EMPTY_DRAWS) == 0 ?
+         NVK_MME_DRAW_INDIRECT : NVK_MME_DRAW_INDIRECT_SKIP_EMPTY;
+#else
+      const enum nvk_mme mme = NVK_MME_DRAW_INDIRECT;
 #endif
       const uint32_t max_draws_per_push =
          MAX2(((NV_PUSH_MAX_COUNT - 3) * 4) / stride, 1);
@@ -5586,7 +5612,7 @@ nvk_CmdDrawIndirect2KHR(VkCommandBuffer commandBuffer,
          }
 
          struct nv_push *p = nvk_cmd_buffer_push(cmd, 3);
-         P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_DRAW_INDIRECT));
+         P_1INC(p, NV9097, CALL_MME_MACRO(mme));
          P_INLINE_DATA(p, count);
          P_INLINE_DATA(p, ignored);
 
@@ -5611,7 +5637,7 @@ nvk_mme_draw_indexed_indirect(struct mme_builder *b)
       mme_while(b, ult, draw, draw_count) {
          mme_tu104_read_fifoed(b, draw_addr, mme_imm(5));
 
-         nvk_mme_build_draw_indexed(b, draw);
+         nvk_mme_build_draw_indexed(b, draw, false);
 
          mme_add_to(b, draw, draw, mme_imm(1));
          mme_add64_to(b, draw_addr, draw_addr, stride);
@@ -5624,7 +5650,7 @@ nvk_mme_draw_indexed_indirect(struct mme_builder *b)
       mme_while(b, ine, draw, draw_count) {
          nvk_mme_spill(b, DRAW_COUNT, draw_count);
 
-         nvk_mme_build_draw_indexed(b, draw);
+         nvk_mme_build_draw_indexed(b, draw, false);
          mme_add_to(b, draw, draw, mme_imm(1));
 
          struct mme_value pad_dw = nvk_mme_load_scratch(b, DRAW_PAD_DW);
@@ -5636,6 +5662,66 @@ nvk_mme_draw_indexed_indirect(struct mme_builder *b)
          nvk_mme_unspill(b, DRAW_COUNT, draw_count);
       }
    }
+}
+
+/* patches/mesa-switch/0012: NVK_MME_DRAW_INDIRECT and
+ * NVK_MME_DRAW_INDEXED_INDIRECT before Turing, except that a draw with no
+ * instances only has its parameters read. Without drawIndirectCount, which
+ * NVK has only from Turing, a renderer that culls on the GPU writes a culled
+ * batch's draw with an instance count of 0 and still issues it. Bevy does,
+ * so most of a pass's indirect draws can be empty, and NVK sets each one up
+ * anyway: on Maxwell B an empty indexed draw takes 54 MME instructions and 16
+ * methods, 4 of them constant buffer updates. Every draw that runs sets all
+ * of that state itself before it begins, so skipping the empty ones changes
+ * nothing a draw sees; afterwards the state is the last draw with instances'
+ * (or the state before the call), as if the empty draws were never issued.
+ * These also store the draw count to scratch once rather than at each draw.
+ */
+static void
+nvk_mme_build_draw_indirect_skip_empty(struct mme_builder *b, bool indexed)
+{
+   if (b->devinfo->cls_eng3d >= TURING_A) {
+      if (indexed)
+         nvk_mme_draw_indexed_indirect(b);
+      else
+         nvk_mme_draw_indirect(b);
+      return;
+   }
+
+   struct mme_value draw_count = mme_load(b);
+   nvk_mme_load_to_scratch(b, DRAW_PAD_DW);
+   nvk_mme_store_scratch(b, DRAW_COUNT, draw_count);
+
+   struct mme_value draw = mme_mov(b, mme_zero());
+   mme_while(b, ine, draw, draw_count) {
+      mme_free_reg(b, draw_count);
+
+      if (indexed)
+         nvk_mme_build_draw_indexed(b, draw, true);
+      else
+         nvk_mme_build_draw(b, draw, true);
+      mme_add_to(b, draw, draw, mme_imm(1));
+
+      struct mme_value pad_dw = nvk_mme_load_scratch(b, DRAW_PAD_DW);
+      mme_loop(b, pad_dw) {
+         mme_free_reg(b, mme_load(b));
+      }
+      mme_free_reg(b, pad_dw);
+
+      nvk_mme_unspill(b, DRAW_COUNT, draw_count);
+   }
+}
+
+void
+nvk_mme_draw_indirect_skip_empty(struct mme_builder *b)
+{
+   nvk_mme_build_draw_indirect_skip_empty(b, false);
+}
+
+void
+nvk_mme_draw_indexed_indirect_skip_empty(struct mme_builder *b)
+{
+   nvk_mme_build_draw_indirect_skip_empty(b, true);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -5678,6 +5764,12 @@ nvk_CmdDrawIndexedIndirect2KHR(VkCommandBuffer commandBuffer,
 #ifdef HAVE_SWITCH_PLATFORM
       if (pInfo->drawCount > 0)
          nvk_cmd_buffer_switch_mme_consumer(cmd);
+      const enum nvk_mme mme =
+         nvk_switch_tune(NVK_SWITCH_TUNE_SKIP_EMPTY_DRAWS) == 0 ?
+         NVK_MME_DRAW_INDEXED_INDIRECT :
+         NVK_MME_DRAW_INDEXED_INDIRECT_SKIP_EMPTY;
+#else
+      const enum nvk_mme mme = NVK_MME_DRAW_INDEXED_INDIRECT;
 #endif
       const uint32_t max_draws_per_push =
          MAX2(((NV_PUSH_MAX_COUNT - 3) * 4) / stride, 1);
@@ -5698,7 +5790,7 @@ nvk_CmdDrawIndexedIndirect2KHR(VkCommandBuffer commandBuffer,
          }
 
          struct nv_push *p = nvk_cmd_buffer_push(cmd, 3);
-         P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_DRAW_INDEXED_INDIRECT));
+         P_1INC(p, NV9097, CALL_MME_MACRO(mme));
          P_INLINE_DATA(p, count);
          P_INLINE_DATA(p, ignored);
 
@@ -5735,7 +5827,7 @@ nvk_mme_draw_indirect_count(struct mme_builder *b)
    mme_while(b, ult, draw, draw_max) {
       mme_tu104_read_fifoed(b, draw_addr, mme_imm(4));
 
-      nvk_mme_build_draw(b, draw);
+      nvk_mme_build_draw(b, draw, false);
 
       mme_add_to(b, draw, draw, mme_imm(1));
       mme_add64_to(b, draw_addr, draw_addr, stride);
@@ -5790,7 +5882,7 @@ nvk_mme_draw_indexed_indirect_count(struct mme_builder *b)
    mme_while(b, ult, draw, draw_max) {
       mme_tu104_read_fifoed(b, draw_addr, mme_imm(5));
 
-      nvk_mme_build_draw_indexed(b, draw);
+      nvk_mme_build_draw_indexed(b, draw, false);
 
       mme_add_to(b, draw, draw, mme_imm(1));
       mme_add64_to(b, draw_addr, draw_addr, stride);

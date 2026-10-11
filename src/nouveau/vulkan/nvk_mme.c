@@ -41,6 +41,11 @@ static const nvk_mme_builder_func mme_builders[NVK_MME_COUNT] = {
    [NVK_MME_DRAW_MESH]                     = nvk_mme_draw_mesh,
    [NVK_MME_DRAW_MESH_INDIRECT]            = nvk_mme_draw_mesh_indirect,
    [NVK_MME_DRAW_MESH_INDIRECT_COUNT]      = nvk_mme_draw_mesh_indirect_count,
+#ifdef HAVE_SWITCH_PLATFORM
+   [NVK_MME_DRAW_INDIRECT_SKIP_EMPTY]      = nvk_mme_draw_indirect_skip_empty,
+   [NVK_MME_DRAW_INDEXED_INDIRECT_SKIP_EMPTY] =
+      nvk_mme_draw_indexed_indirect_skip_empty,
+#endif
 };
 
 static const struct nvk_mme_test_case *mme_tests[NVK_MME_COUNT] = {

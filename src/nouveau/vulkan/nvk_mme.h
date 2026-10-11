@@ -46,6 +46,15 @@ enum nvk_mme {
    NVK_MME_DRAW_MESH_INDIRECT,
    NVK_MME_DRAW_MESH_INDIRECT_COUNT,
 
+#ifdef HAVE_SWITCH_PLATFORM
+   /* NVK_MME_DRAW_INDIRECT and NVK_MME_DRAW_INDEXED_INDIRECT for Maxwell,
+    * except that a draw with no instances only has its parameters read
+    * (patches/mesa-switch/0012).
+    */
+   NVK_MME_DRAW_INDIRECT_SKIP_EMPTY,
+   NVK_MME_DRAW_INDEXED_INDIRECT_SKIP_EMPTY,
+#endif
+
    NVK_MME_COUNT,
 };
 
@@ -250,6 +259,11 @@ void nvk_mme_draw(struct mme_builder *b);
 void nvk_mme_draw_indexed(struct mme_builder *b);
 void nvk_mme_draw_indirect(struct mme_builder *b);
 void nvk_mme_draw_indexed_indirect(struct mme_builder *b);
+/* Built on every platform so the host can test them; only the Switch
+ * uploads them.
+ */
+void nvk_mme_draw_indirect_skip_empty(struct mme_builder *b);
+void nvk_mme_draw_indexed_indirect_skip_empty(struct mme_builder *b);
 void nvk_mme_draw_indirect_count(struct mme_builder *b);
 void nvk_mme_draw_indexed_indirect_count(struct mme_builder *b);
 void nvk_mme_begin_cond_render(struct mme_builder *b);
