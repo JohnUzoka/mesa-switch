@@ -237,7 +237,10 @@ nak_optimize_nir(nir_shader *nir, const struct nak_compiler *nak)
          LOOP_OPT_NOT_IDEMPOTENT(nir, nir_opt_loop_unroll);
       }
       LOOP_OPT(nir, nir_opt_remove_phis);
-      LOOP_OPT_NOT_IDEMPOTENT(nir, nir_opt_gcm, false, true);
+      /* NAK_DEBUG=lsink also keeps texture instructions in large loops:
+       * hoisted, their results are live across the whole loop.
+       */
+      LOOP_OPT_NOT_IDEMPOTENT(nir, nir_opt_gcm, false, !nak_debug_lsink());
       LOOP_OPT(nir, nir_opt_undef);
    } while (progress);
    OPT(nir, nir_lower_undef_to_zero, NULL);
@@ -1663,6 +1666,105 @@ nak_nir_lower_interlock(nir_shader *nir, const struct nak_compiler *nak)
    return nir_progress(true, impl, nir_metadata_none);
 }
 
+/* The same threshold as nir_opt_gcm's MAX_LOOP_INSTRUCTIONS: GCM hoists
+ * instructions out of smaller loops again, and leaves them in larger ones.
+ */
+#define NAK_LSINK_MIN_LOOP_INSTRS 100
+
+static bool
+cf_node_is_inside(const nir_cf_node *node, const nir_cf_node *ancestor)
+{
+   for (; node != NULL; node = node->parent) {
+      if (node == ancestor)
+         return true;
+   }
+   return false;
+}
+
+static unsigned
+loop_instr_count(nir_loop *loop)
+{
+   unsigned count = 0;
+   nir_foreach_block_in_cf_node(block, &loop->cf_node)
+      count += exec_list_length(&block->instr_list);
+   return count;
+}
+
+/* NAK_DEBUG=lsink: a fragment input read only inside a large loop is read
+ * there.  nir_opt_sink never sinks into a loop, so such a value stays live
+ * across the whole loop, back edge included, rather than until its last use.
+ * Interpolating it again on each trip costs an IPA; it gives the same value
+ * wherever it runs (discard is a demote here), so this changes no output.
+ */
+static bool
+nak_nir_sink_inputs_into_loops(nir_shader *nir)
+{
+   bool progress = false;
+
+   nir_foreach_function_impl(impl, nir) {
+      bool impl_progress = false;
+      nir_metadata_require(impl, nir_metadata_block_index |
+                                 nir_metadata_dominance |
+                                 nir_metadata_dominance_lca);
+
+      nir_foreach_block_reverse(block, impl) {
+         nir_foreach_instr_reverse_safe(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+            if (intrin->intrinsic != nir_intrinsic_load_interpolated_input &&
+                intrin->intrinsic != nir_intrinsic_load_input &&
+                intrin->intrinsic != nir_intrinsic_load_frag_coord)
+               continue;
+
+            /* nir_src_get_block gives a phi source's predecessor. */
+            nir_block *lca = NULL;
+            nir_foreach_use_including_if(use, &intrin->def)
+               lca = nir_dominance_lca(lca, nir_src_get_block(use));
+            if (lca == NULL || lca == block)
+               continue;
+
+            /* The outermost loop around every use that the load is not in,
+             * and the outermost loop inside that one around them all.
+             */
+            nir_loop *loop = NULL, *inner = NULL;
+            for (nir_cf_node *node = lca->cf_node.parent; node != NULL;
+                 node = node->parent) {
+               if (node->type != nir_cf_node_loop)
+                  continue;
+               if (cf_node_is_inside(&block->cf_node, node))
+                  break;
+               inner = loop;
+               loop = nir_cf_node_as_loop(node);
+            }
+            if (loop == NULL ||
+                loop_instr_count(loop) < NAK_LSINK_MIN_LOOP_INSTRS)
+               continue;
+
+            /* Read once a trip of the large loop, not once a trip of a loop
+             * inside it: just before that one, which dominates every use.
+             */
+            nir_cursor cursor = nir_after_phis(lca);
+            if (inner != NULL) {
+               nir_block *before =
+                  nir_cf_node_as_block(nir_cf_node_prev(&inner->cf_node));
+               cursor = nir_after_block_before_jump(before);
+            }
+
+            nir_instr_remove(instr);
+            nir_instr_insert(cursor, instr);
+            impl_progress = true;
+         }
+      }
+
+      progress |= nir_progress(impl_progress, impl,
+                               nir_metadata_control_flow);
+   }
+
+   return progress;
+}
+
 void
 nak_postprocess_nir(nir_shader *nir,
                     const struct nak_compiler *nak,
@@ -1829,6 +1931,8 @@ nak_postprocess_nir(nir_shader *nir,
          OPT(nir, nir_opt_sink, nir_move_load_input | nir_move_load_frag_coord);
          OPT(nir, nir_opt_move, nir_move_load_input | nir_move_load_frag_coord);
       }
+      if (nak_debug_lsink() && OPT(nir, nak_nir_sink_inputs_into_loops))
+         OPT(nir, nir_opt_move, nir_move_load_input | nir_move_load_frag_coord);
       OPT(nir, nak_nir_lower_fs_inputs, nak, fs_key);
       OPT(nir, nak_nir_lower_fs_outputs);
       break;

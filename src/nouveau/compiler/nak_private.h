@@ -18,6 +18,7 @@ bool nak_should_print_nir(void);
 bool nak_debug_no_ugpr(void);
 bool nak_debug_sink(void);
 bool nak_debug_remat(void);
+bool nak_debug_lsink(void);
 
 struct nak_compiler {
    uint8_t sm;
