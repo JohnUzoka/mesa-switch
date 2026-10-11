@@ -205,6 +205,21 @@ static const uint32_t mul_cases[] = {
    0xfffe0000,
 };
 
+/* The Fermi simulator starts with every register at zero, but a macro's
+ * earlier work leaves values in the registers it frees, and the builder hands
+ * those out again.  This leaves small values in the next ones, so a result
+ * that is added to without being cleared first comes out wrong.
+ */
+static void
+dirty_free_regs(mme_builder *b)
+{
+   mme_value regs[4];
+   for (uint32_t i = 0; i < ARRAY_SIZE(regs); i++)
+      regs[i] = mme_mov(b, mme_imm(i + 3));
+   for (uint32_t i = 0; i < ARRAY_SIZE(regs); i++)
+      mme_free_reg(b, regs[i]);
+}
+
 TEST_F(mme_builder_test, mul_32x32_32)
 {
    for (auto sim : sims) {
@@ -213,6 +228,7 @@ TEST_F(mme_builder_test, mul_32x32_32)
 
       mme_value x = mme_load(&b);
       mme_value y = mme_load(&b);
+      dirty_free_regs(&b);
 
       sim->mme_store_data(&b, 0, mme_mul_32x32_32_free_srcs(&b, x, y));
 
@@ -239,6 +255,7 @@ TEST_F(mme_builder_test, umul_32x32_64)
 
       mme_value x = mme_load(&b);
       mme_value y = mme_load(&b);
+      dirty_free_regs(&b);
 
       struct mme_value64 d = mme_umul_32x32_64_free_srcs(&b, x, y);
 
@@ -273,6 +290,7 @@ TEST_F(mme_builder_test, umul_32x64_64)
       struct mme_value64 y;
       y.lo = mme_load(&b);
       y.hi = mme_load(&b);
+      dirty_free_regs(&b);
 
       struct mme_value64 d = mme_umul_32x64_64_free_srcs(&b, x, y);
 
