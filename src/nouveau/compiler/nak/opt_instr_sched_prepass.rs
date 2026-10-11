@@ -579,8 +579,24 @@ impl<'a> GenerateOrder<'a> {
                 );
                 dep_instr.num_uses -= 1;
                 if dep_instr.num_uses <= 0 {
-                    future_ready_instrs
-                        .insert(FutureReadyInstr::new(g, edge.head_idx));
+                    // FutureReadyInstr::new reads the graph's label, which
+                    // this pass never updates (the graph is shared between
+                    // attempts), so the ready cycle above would go unused
+                    // and every instruction would be ready at once.
+                    let future_ready_instr = if DEBUG.plat() {
+                        let label = &g.nodes[edge.head_idx].label;
+                        FutureReadyInstr {
+                            ready_cycle: Reverse(
+                                dep_instr
+                                    .ready_cycle
+                                    .saturating_sub(label.exec_latency),
+                            ),
+                            index: edge.head_idx,
+                        }
+                    } else {
+                        FutureReadyInstr::new(g, edge.head_idx)
+                    };
+                    future_ready_instrs.insert(future_ready_instr);
                 }
             }
 

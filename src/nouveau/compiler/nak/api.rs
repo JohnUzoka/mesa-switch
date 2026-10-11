@@ -36,6 +36,7 @@ enum DebugFlags {
     UBra,
     XBrk,
     LSink,
+    PLat,
 }
 
 pub struct Debug {
@@ -70,6 +71,7 @@ impl Debug {
                 "ubra" => flags |= 1 << DebugFlags::UBra as u8,
                 "xbrk" => flags |= 1 << DebugFlags::XBrk as u8,
                 "lsink" => flags |= 1 << DebugFlags::LSink as u8,
+                "plat" => flags |= 1 << DebugFlags::PLat as u8,
                 unk => eprintln!("Unknown NAK_DEBUG flag \"{}\"", unk),
             }
         }
@@ -138,6 +140,10 @@ pub trait GetDebugFlags {
 
     fn lsink(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::LSink as u8) != 0
+    }
+
+    fn plat(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::PLat as u8) != 0
     }
 }
 
