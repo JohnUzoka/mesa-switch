@@ -232,6 +232,10 @@ struct nvk_compute_state {
    struct nvk_descriptor_state descriptors;
    struct nvk_shader *shader;
    bool active_compute_invocations_query;
+   /* Direct dispatches' invocations since the query began, added to the
+    * MME's count when it ends.
+    */
+   uint64_t pending_cs_invocations;
 };
 
 struct nvk_cmd_push {
@@ -345,6 +349,7 @@ void nvk_cmd_buffer_begin_compute(struct nvk_cmd_buffer *cmd,
 
 void nvk_cmd_invalidate_graphics_state(struct nvk_cmd_buffer *cmd);
 void nvk_cmd_invalidate_compute_state(struct nvk_cmd_buffer *cmd);
+void nvk_cmd_add_cs_invocations(struct nvk_cmd_buffer *cmd, uint64_t count);
 
 void nvk_cmd_bind_shaders(struct vk_command_buffer *vk_cmd,
                           uint32_t stage_count,

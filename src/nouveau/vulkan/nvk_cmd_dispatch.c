@@ -296,6 +296,18 @@ nvk_mme_add_cs_invocations(struct mme_builder *b)
    nvk_build_mme_add_cs_invocations(b, count);
 }
 
+void
+nvk_cmd_add_cs_invocations(struct nvk_cmd_buffer *cmd, uint64_t count)
+{
+   struct nv_push *p = nvk_cmd_buffer_push(cmd, 3);
+   if (nvk_cmd_buffer_compute_cls(cmd) >= AMPERE_COMPUTE_B)
+      P_1INC(p, NVC7C0, CALL_MME_MACRO(NVK_MME_ADD_CS_INVOCATIONS));
+   else
+      P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_ADD_CS_INVOCATIONS));
+   P_INLINE_DATA(p, count >> 32);
+   P_INLINE_DATA(p, count);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 nvk_CmdDispatchBase(VkCommandBuffer commandBuffer,
                     uint32_t baseGroupX,
@@ -328,13 +340,15 @@ nvk_CmdDispatchBase(VkCommandBuffer commandBuffer,
          (uint64_t)local_size * (uint64_t)groupCountX *
          (uint64_t)groupCountY * (uint64_t)groupCountZ;
 
-      struct nv_push *p = nvk_cmd_buffer_push(cmd, 3);
-      if (nvk_cmd_buffer_compute_cls(cmd) >= AMPERE_COMPUTE_B)
-         P_1INC(p, NVC7C0, CALL_MME_MACRO(NVK_MME_ADD_CS_INVOCATIONS));
-      else
-         P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_ADD_CS_INVOCATIONS));
-      P_INLINE_DATA(p, cs_invocations >> 32);
-      P_INLINE_DATA(p, cs_invocations);
+      /* A query begun in this command buffer ends in it, so its count can
+       * wait for vkCmdEndQuery.  Before Ampere the macro is a 3D method, and
+       * one between every two dispatches made them slower on the Switch.
+       */
+      if (cmd->state.cs.active_compute_invocations_query) {
+         cmd->state.cs.pending_cs_invocations += cs_invocations;
+      } else {
+         nvk_cmd_add_cs_invocations(cmd, cs_invocations);
+      }
    }
 
    struct nv_push *p = nvk_cmd_buffer_push(cmd, 4);

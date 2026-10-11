@@ -678,6 +678,7 @@ nvk_cmd_set_statistics_counters(struct nvk_cmd_buffer *cmd,
           pool->vk.pipeline_statistics &
              VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT) {
          cmd->state.cs.active_compute_invocations_query = enable;
+         cmd->state.cs.pending_cs_invocations = 0;
       }
       break;
    }
@@ -752,6 +753,11 @@ nvk_CmdEndQueryIndexedEXT(VkCommandBuffer commandBuffer,
    }
 
    case VK_QUERY_TYPE_PIPELINE_STATISTICS: {
+      if (cmd->state.cs.pending_cs_invocations != 0) {
+         nvk_cmd_add_cs_invocations(cmd, cmd->state.cs.pending_cs_invocations);
+         cmd->state.cs.pending_cs_invocations = 0;
+      }
+
       uint32_t stat_count = util_bitcount(pool->vk.pipeline_statistics);
       struct nv_push *p = nvk_cmd_buffer_push(cmd, stat_count * 5);
 

@@ -704,10 +704,13 @@ nvk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
     */
    const bool active_compute_invocations_query =
       cmd->state.cs.active_compute_invocations_query;
+   const uint64_t pending_cs_invocations =
+      cmd->state.cs.pending_cs_invocations;
    nvk_cmd_invalidate_graphics_state(cmd);
    nvk_cmd_invalidate_compute_state(cmd);
    cmd->state.cs.active_compute_invocations_query =
       active_compute_invocations_query;
+   cmd->state.cs.pending_cs_invocations = pending_cs_invocations;
 }
 
 enum nvk_barrier {
