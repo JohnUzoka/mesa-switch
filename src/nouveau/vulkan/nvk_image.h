@@ -93,6 +93,13 @@ struct nvk_zcull_plane {
    uint64_t addr;
    uint64_t plane_offset_B;
    bool transient_eligible;
+   /* The ZDIR (SET_ZCULL_DIR_FORMAT) the saved data was last cleared with,
+    * LESS (0) until then.  On the Switch the direction can change between
+    * frames (patches/mesa-switch/0009), and data must be loaded with the
+    * direction it was built with.  Command buffers record on any thread:
+    * read and written with p_atomic_*.
+    */
+   uint32_t zdir;
 };
 
 struct nvk_image {
