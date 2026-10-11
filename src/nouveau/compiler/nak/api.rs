@@ -3,8 +3,8 @@
 
 use crate::from_nir::*;
 use crate::ir::{
-    max_warps_per_sm, ShaderInfo, ShaderIoInfo, ShaderModel, ShaderModelInfo,
-    ShaderStageInfo,
+    max_warps_per_sm, Op, ShaderInfo, ShaderIoInfo, ShaderModel,
+    ShaderModelInfo, ShaderStageInfo,
 };
 use crate::sph;
 
@@ -28,6 +28,7 @@ enum DebugFlags {
     Annotate,
     NoUgpr,
     Cycles,
+    Stats,
 }
 
 pub struct Debug {
@@ -54,6 +55,7 @@ impl Debug {
                 "annotate" => flags |= 1 << DebugFlags::Annotate as u8,
                 "nougpr" => flags |= 1 << DebugFlags::NoUgpr as u8,
                 "cycles" => flags |= 1 << DebugFlags::Cycles as u8,
+                "stats" => flags |= 1 << DebugFlags::Stats as u8,
                 unk => eprintln!("Unknown NAK_DEBUG flag \"{}\"", unk),
             }
         }
@@ -90,6 +92,10 @@ pub trait GetDebugFlags {
 
     fn cycles(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::Cycles as u8) != 0
+    }
+
+    fn stats(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::Stats as u8) != 0
     }
 }
 
@@ -545,6 +551,21 @@ fn nak_compile_shader_internal(
 
     s.gather_info();
 
+    // NAK_DEBUG=stats: one line per shader, without the IR that "print" also
+    // writes, which on a slow CPU makes a large shader take minutes to build.
+    let mut op_counts = [0u32; 6];
+    if DEBUG.stats() {
+        s.for_each_instr(&mut |i| match &i.op {
+            Op::Tex(_) => op_counts[0] += 1,
+            Op::Txd(_) => op_counts[1] += 1,
+            Op::Tld(_) | Op::Tld4(_) => op_counts[2] += 1,
+            Op::Ld(_) | Op::Ldc(_) => op_counts[3] += 1,
+            Op::Ipa(_) => op_counts[4] += 1,
+            Op::Bra(_) => op_counts[5] += 1,
+            _ => {}
+        });
+    }
+
     let mut asm = String::new();
     if dump_asm {
         write!(asm, "{}", s).expect("Failed to dump assembly");
@@ -552,6 +573,40 @@ fn nak_compile_shader_internal(
 
     let code = sm.encode_shader(&s);
     let bin = Box::new(ShaderBin::new(&sm, &s.info, fs_key, code, &asm));
+    if DEBUG.stats() {
+        let info = &bin.bin.info;
+        let stage = unsafe {
+            CStr::from_ptr(_mesa_shader_stage_to_string(info.stage as u32))
+        };
+        let name = if nir.info.name.is_null() {
+            Default::default()
+        } else {
+            unsafe { CStr::from_ptr(nir.info.name) }.to_string_lossy()
+        };
+        let hash = &nir.info.source_blake3;
+        let [tex, txd, tld, ld, ipa, bra] = op_counts;
+        eprintln!(
+            "NAK_STATS stage={} instrs={} static_cycles={} max_warps={} \
+             gprs={} slm={} spills_mem={} fills_mem={} spills_reg={} \
+             fills_reg={} tex={tex} txd={txd} tld={tld} ld={ld} ipa={ipa} \
+             bra={bra} source={:02x}{:02x}{:02x}{:02x} name={}",
+            stage.to_string_lossy(),
+            info.num_instrs,
+            info.num_static_cycles,
+            info.max_warps_per_sm,
+            info.num_gprs,
+            info.slm_size,
+            info.num_spills_to_mem,
+            info.num_fills_from_mem,
+            info.num_spills_to_reg,
+            info.num_fills_from_reg,
+            hash[0],
+            hash[1],
+            hash[2],
+            hash[3],
+            name,
+        );
+    }
     Box::into_raw(bin) as *mut nak_shader_bin
 }
 
