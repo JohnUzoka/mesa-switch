@@ -11,6 +11,7 @@
 #include "nvk_physical_device.h"
 #include "nvkmd/nvkmd.h"
 #include "util/detect_os.h"
+#include "util/u_atomic.h"
 #include "vk_android.h"
 #include "vk_enum_to_str.h"
 #include "vk_format.h"
@@ -1689,6 +1690,27 @@ nvk_GetDeviceImageSubresourceLayoutKHR(
    nvk_image_finish(dev, &image, NULL);
 }
 
+#ifdef __SWITCH__
+/* Says on stderr, for the first 32 images bound to memory of their own,
+ * whether NVK compresses them and the PTE kind their memory is mapped with.
+ */
+static void
+nvk_switch_report_dedicated(const struct nvk_image *image,
+                            const struct nvk_device_memory *mem)
+{
+   static uint32_t reported;
+   if (p_atomic_inc_return(&reported) > 32)
+      return;
+
+   fprintf(stderr, "[NVK] compression: a %ux%ux%u %s image with memory of "
+           "its own is %s, PTE kind 0x%02x\n",
+           image->vk.extent.width, image->vk.extent.height,
+           image->vk.array_layers, vk_Format_to_str(image->vk.format),
+           image->is_compressed ? "compressed" : "not compressed",
+           mem->mem->va->pte_kind);
+}
+#endif
+
 static VkResult
 nvk_image_plane_bind(struct nvk_device *dev,
                      struct nvk_image *image,
@@ -1716,6 +1738,10 @@ nvk_image_plane_bind(struct nvk_device *dev,
          if (result != VK_SUCCESS)
             return result;
       }
+#ifdef __SWITCH__
+      if (mem->dedicated_image == image)
+         nvk_switch_report_dedicated(image, mem);
+#endif
    } else {
       plane->addr = mem->mem->va->addr + offset_B;
    }
