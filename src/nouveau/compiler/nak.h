@@ -27,6 +27,9 @@ void nak_compiler_destroy(struct nak_compiler *nak);
 
 uint64_t nak_debug_flags(const struct nak_compiler *nak);
 
+/* NAK_GPR_LIMIT, or 0 when unset. */
+uint32_t nak_debug_gpr_limit(const struct nak_compiler *nak);
+
 const struct nir_shader_compiler_options *
 nak_nir_options(const struct nak_compiler *nak);
 

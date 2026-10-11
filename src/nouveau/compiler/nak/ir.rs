@@ -9728,11 +9728,29 @@ pub trait ShaderModel {
 pub struct ShaderModelInfo {
     sm: u8,
     warps_per_sm: u8,
+    gpr_limit: Option<u32>,
 }
 
 impl ShaderModelInfo {
     pub fn new(sm: u8, warps_per_sm: u8) -> Self {
-        ShaderModelInfo { sm, warps_per_sm }
+        ShaderModelInfo {
+            sm,
+            warps_per_sm,
+            gpr_limit: None,
+        }
+    }
+
+    /// The same model, for a shader whose registers are capped at `limit`
+    /// (api.rs `gpr_limit`).
+    pub fn with_gpr_limit(self, limit: Option<u32>) -> Self {
+        ShaderModelInfo {
+            gpr_limit: limit,
+            ..self
+        }
+    }
+
+    pub fn gpr_limit(&self) -> Option<u32> {
+        self.gpr_limit
     }
 }
 

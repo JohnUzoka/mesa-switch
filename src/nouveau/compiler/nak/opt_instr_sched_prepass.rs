@@ -1056,6 +1056,12 @@ impl Shader<'_> {
                 .unwrap(),
             );
         }
+        if let Some(limit) = self.sm.gpr_limit() {
+            max_regs[RegFile::GPR] = min(
+                max_regs[RegFile::GPR],
+                (limit - self.sm.hw_reserved_gprs()).try_into().unwrap(),
+            );
+        }
         max_regs[RegFile::GPR] -= SW_RESERVED_GPRS;
 
         for f in &mut self.functions {

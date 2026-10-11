@@ -143,6 +143,53 @@ pub trait GetDebugFlags {
 
 pub static DEBUG: OnceLock<Debug> = OnceLock::new();
 
+static GPR_LIMIT: OnceLock<Option<u32>> = OnceLock::new();
+
+fn valid_gpr_limit(n: u32) -> bool {
+    n >= 24 && n <= 248 && n % 8 == 0
+}
+
+/// `NAK_GPR_LIMIT=n` caps the GPRs any shader may use at n, a multiple of 8
+/// from 24 to 248; register allocation spills what does not fit. Fewer
+/// registers let more warps share a multiprocessor, at the spills' cost.
+pub fn env_gpr_limit() -> Option<u32> {
+    *GPR_LIMIT.get_or_init(|| {
+        let n: u32 = env::var("NAK_GPR_LIMIT").ok()?.trim().parse().ok()?;
+        if valid_gpr_limit(n) {
+            Some(n)
+        } else {
+            eprintln!("NAK_GPR_LIMIT={n} ignored: not a multiple of 8 from 24 to 248");
+            None
+        }
+    })
+}
+
+/// A shader whose entry point's name ends in `_gpr` and a cap, such as
+/// `fragment_gpr48`, is compiled under that cap, so one application can
+/// compile the same shader with and without one. The entry point's name is
+/// part of the pipeline's hash, so their binaries are cached apart.
+fn entry_gpr_limit(nir: &nir_shader) -> Option<u32> {
+    let entry = nir.iter_functions().find(|f| f.is_entrypoint)?;
+    if entry.name.is_null() {
+        return None;
+    }
+    let name = unsafe { CStr::from_ptr(entry.name) }.to_str().ok()?;
+    let n: u32 = name.rsplit_once("_gpr")?.1.parse().ok()?;
+    valid_gpr_limit(n).then_some(n)
+}
+
+/// The cap on `nir`: the lower of `NAK_GPR_LIMIT` and its entry point's, if
+/// either. It goes to the passes with the shader model
+/// (`ShaderModelInfo::with_gpr_limit`), so each compile carries its own,
+/// rather than in a thread-local: on the Switch this crate is built for Linux,
+/// whose thread-locals read `TPIDR_EL0`, a register libnx never sets.
+fn gpr_limit(nir: &nir_shader) -> Option<u32> {
+    match (entry_gpr_limit(nir), env_gpr_limit()) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 impl GetDebugFlags for OnceLock<Debug> {
     fn debug_flags(&self) -> u32 {
         self.get_or_init(Debug::new).flags
@@ -284,6 +331,11 @@ pub extern "C" fn nak_compiler_destroy(nak: *mut nak_compiler) {
 #[no_mangle]
 pub extern "C" fn nak_debug_flags(_nak: *const nak_compiler) -> u64 {
     DEBUG.debug_flags().into()
+}
+
+#[no_mangle]
+pub extern "C" fn nak_debug_gpr_limit(_nak: *const nak_compiler) -> u32 {
+    env_gpr_limit().unwrap_or(0)
 }
 
 #[no_mangle]
@@ -574,7 +626,8 @@ fn nak_compile_shader_internal(
         Some(unsafe { &*fs_key })
     };
 
-    let sm = ShaderModelInfo::new(nak.sm, nak.warps_per_sm);
+    let sm = ShaderModelInfo::new(nak.sm, nak.warps_per_sm)
+        .with_gpr_limit(gpr_limit(nir));
     let mut s = nak_shader_from_nir(nak, nir, &sm, has_task_shader);
 
     if DEBUG.print() {
@@ -678,7 +731,7 @@ fn nak_compile_shader_internal(
                  gprs={} slm={} spills_mem={} fills_mem={} spills_reg={} \
                  fills_reg={} tex={tex} txd={txd} tld={tld} ld={ld} ipa={ipa} \
                  bra={bra} waits={waits} bra_waits={bra_waits} \
-                 source={:02x}{:02x}{:02x}{:02x} name={}",
+                 source={:02x}{:02x}{:02x}{:02x} name={} cap={}",
                 stage.to_string_lossy(),
                 info.num_instrs,
                 info.num_static_cycles,
@@ -694,6 +747,7 @@ fn nak_compile_shader_internal(
                 hash[2],
                 hash[3],
                 name,
+                sm.gpr_limit().unwrap_or(0),
             );
         }
     }

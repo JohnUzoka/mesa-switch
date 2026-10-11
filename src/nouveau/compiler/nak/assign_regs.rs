@@ -1478,6 +1478,9 @@ impl Shader<'_> {
         }
 
         let hw_reserved_gprs = self.sm.hw_reserved_gprs();
+        if let Some(limit) = self.sm.gpr_limit() {
+            max_gprs = min(max_gprs, limit - hw_reserved_gprs);
+        }
         if let ShaderStageInfo::Compute(cs_info) = &self.info.stage {
             max_gprs = min(
                 max_gprs,

@@ -25,6 +25,7 @@
 #include "compiler/spirv/nir_spirv.h"
 
 #include "util/mesa-blake3.h"
+#include "util/u_atomic.h"
 #include "util/u_debug.h"
 
 #include "cla097.h"
@@ -76,13 +77,17 @@ nvk_physical_device_compiler_flags(const struct nvk_physical_device *pdev)
    bool no_cbufs = pdev->debug_flags & NVK_DEBUG_NO_CBUF;
    bool use_edb_buffer_views = nvk_use_edb_buffer_views(pdev);
    uint64_t nak_flags = nak_debug_flags(pdev->nak);
+   /* NAK_GPR_LIMIT changes the code, so it keys the shader cache too. */
+   uint64_t nak_gpr_limit = nak_debug_gpr_limit(pdev->nak);
 
    assert(nak_flags <= UINT16_MAX);
+   assert(nak_gpr_limit <= UINT8_MAX);
 
    return (no_cbufs ? 1 << 12 : 0)
       | (use_edb_buffer_views ? 1 << 13 : 0)
       | (instance->drirc.misc.ssbo_align_4b ? 1 << 14 : 0)
       | (UINT64_C(10) << 16) /* Compiler ABI revision. */
+      | (nak_gpr_limit << 24)
       | (nak_flags << 48);
 }
 
@@ -543,6 +548,36 @@ nvk_shader_dump(struct nvk_shader *shader)
 }
 #endif
 
+#ifdef __SWITCH__
+/* Says on stderr, for the first 32 shaders whose entry point's name asks NAK
+ * for a register cap (such as fragment_gpr48), what NAK compiled, so a run on
+ * a Switch shows the cap took effect. NAK's own NAK_STATS lines never reach
+ * the Switch's log.
+ */
+static void
+nvk_switch_report_gpr_cap(nir_shader *nir, const struct nak_shader_info *info)
+{
+   const char *name = NULL;
+   nir_foreach_function(func, nir) {
+      if (func->is_entrypoint)
+         name = func->name;
+   }
+   if (name == NULL || strstr(name, "_gpr") == NULL)
+      return;
+
+   static uint32_t reported;
+   if (p_atomic_inc_return(&reported) > 32)
+      return;
+
+   fprintf(stderr, "[NVK] register cap: %s compiled to %u instructions in %u "
+           "registers, %u warps per SM, %u spills and %u fills to %u bytes "
+           "of local memory\n",
+           name, info->num_instrs, info->num_gprs, info->max_warps_per_sm,
+           info->num_spills_to_mem, info->num_fills_from_mem,
+           info->slm_size);
+}
+#endif
+
 static VkResult
 nvk_compile_nir(struct nvk_device *dev, nir_shader *nir,
                 VkShaderCreateFlagsEXT shader_flags,
@@ -570,6 +605,9 @@ nvk_compile_nir(struct nvk_device *dev, nir_shader *nir,
       return vk_errorf(pdev, VK_ERROR_UNKNOWN, "Internal compiler error in NAK");
 
    shader->info = shader->nak->info;
+#ifdef __SWITCH__
+   nvk_switch_report_gpr_cap(nir, &shader->info);
+#endif
    shader->asm_str = shader->nak->asm_str;
    shader->code_ptr = shader->nak->code;
    shader->code_size = shader->nak->code_size;
