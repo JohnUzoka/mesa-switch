@@ -20,6 +20,7 @@ use std::panic;
 use std::sync::OnceLock;
 
 #[repr(u8)]
+#[derive(Clone, Copy)]
 enum DebugFlags {
     Panic,
     Print,
@@ -39,41 +40,75 @@ enum DebugFlags {
     PLat,
 }
 
+const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 16] = [
+    ("panic", DebugFlags::Panic),
+    ("print", DebugFlags::Print),
+    ("serial", DebugFlags::Serial),
+    ("spill", DebugFlags::Spill),
+    ("annotate", DebugFlags::Annotate),
+    ("nougpr", DebugFlags::NoUgpr),
+    ("cycles", DebugFlags::Cycles),
+    ("stats", DebugFlags::Stats),
+    ("xbar", DebugFlags::XBar),
+    ("final", DebugFlags::Final),
+    ("sink", DebugFlags::Sink),
+    ("remat", DebugFlags::Remat),
+    ("ubra", DebugFlags::UBra),
+    ("xbrk", DebugFlags::XBrk),
+    ("lsink", DebugFlags::LSink),
+    ("plat", DebugFlags::PLat),
+];
+
+/// The flags NAK_DEBUG starts from. Switch builds (meson sets
+/// nak_switch_defaults for horizon) start from the ones measured faster on the
+/// console; other builds start from none.
+#[cfg(nak_switch_defaults)]
+const DEFAULT_DEBUG_FLAGS: &str = "xbar,sink,remat,xbrk,lsink,plat";
+#[cfg(not(nak_switch_defaults))]
+const DEFAULT_DEBUG_FLAGS: &str = "";
+
 pub struct Debug {
     flags: u32,
 }
 
 impl Debug {
-    fn new() -> Debug {
-        let debug_var = "NAK_DEBUG";
-        let debug_str = match env::var(debug_var) {
-            Ok(s) => s,
-            Err(_) => {
-                return Debug { flags: 0 };
+    /// Applies a comma-separated list of flag names to `flags`: "name" turns
+    /// a flag on and "-name" turns it off.
+    fn apply(mut flags: u32, list: &str) -> u32 {
+        for item in list.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
             }
-        };
+            let (off, name) = match item.strip_prefix('-') {
+                Some(name) => (true, name),
+                None => (false, item),
+            };
+            match DEBUG_FLAG_NAMES.iter().find(|(n, _)| *n == name) {
+                Some(&(_, flag)) if off => flags &= !(1 << flag as u8),
+                Some(&(_, flag)) => flags |= 1 << flag as u8,
+                None => eprintln!("Unknown NAK_DEBUG flag \"{}\"", item),
+            }
+        }
+        flags
+    }
 
-        let mut flags = 0;
-        for flag in debug_str.split(',') {
-            match flag.trim() {
-                "panic" => flags |= 1 << DebugFlags::Panic as u8,
-                "print" => flags |= 1 << DebugFlags::Print as u8,
-                "serial" => flags |= 1 << DebugFlags::Serial as u8,
-                "spill" => flags |= 1 << DebugFlags::Spill as u8,
-                "annotate" => flags |= 1 << DebugFlags::Annotate as u8,
-                "nougpr" => flags |= 1 << DebugFlags::NoUgpr as u8,
-                "cycles" => flags |= 1 << DebugFlags::Cycles as u8,
-                "stats" => flags |= 1 << DebugFlags::Stats as u8,
-                "xbar" => flags |= 1 << DebugFlags::XBar as u8,
-                "final" => flags |= 1 << DebugFlags::Final as u8,
-                "sink" => flags |= 1 << DebugFlags::Sink as u8,
-                "remat" => flags |= 1 << DebugFlags::Remat as u8,
-                "ubra" => flags |= 1 << DebugFlags::UBra as u8,
-                "xbrk" => flags |= 1 << DebugFlags::XBrk as u8,
-                "lsink" => flags |= 1 << DebugFlags::LSink as u8,
-                "plat" => flags |= 1 << DebugFlags::PLat as u8,
-                unk => eprintln!("Unknown NAK_DEBUG flag \"{}\"", unk),
-            }
+    fn new() -> Debug {
+        let mut flags = Debug::apply(0, DEFAULT_DEBUG_FLAGS);
+        if let Ok(debug_str) = env::var("NAK_DEBUG") {
+            flags = Debug::apply(flags, &debug_str);
+        }
+        if !DEFAULT_DEBUG_FLAGS.is_empty() {
+            let on: Vec<&str> = DEBUG_FLAG_NAMES
+                .iter()
+                .filter(|(_, flag)| flags & (1 << *flag as u8) != 0)
+                .map(|(name, _)| *name)
+                .collect();
+            eprintln!(
+                "NAK_DEBUG in effect: {} (Switch defaults {}; \"-name\" turns one off)",
+                if on.is_empty() { "none".to_string() } else { on.join(",") },
+                DEFAULT_DEBUG_FLAGS,
+            );
         }
         Debug { flags: flags }
     }
@@ -783,5 +818,28 @@ pub extern "C" fn nak_compile_shader(
         compile()
     } else {
         panic::catch_unwind(compile).unwrap_or(std::ptr::null_mut())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_flag_names_in_enum_order() {
+        for (i, (_, flag)) in DEBUG_FLAG_NAMES.iter().enumerate() {
+            assert_eq!(*flag as usize, i);
+        }
+    }
+
+    #[test]
+    fn debug_flags_on_and_off() {
+        let xbar = 1 << DebugFlags::XBar as u8;
+        let plat = 1 << DebugFlags::PLat as u8;
+        assert_eq!(Debug::apply(0, ""), 0);
+        assert_eq!(Debug::apply(0, " xbar, plat,"), xbar | plat);
+        assert_eq!(Debug::apply(xbar | plat, "-plat"), xbar);
+        assert_eq!(Debug::apply(xbar, "-plat,,stats,-stats"), xbar);
+        assert_eq!(Debug::apply(0, "-xbar,nonsense"), 0);
     }
 }

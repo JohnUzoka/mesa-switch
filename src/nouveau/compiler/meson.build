@@ -92,16 +92,22 @@ _libnak_ir_proc_rs = rust.proc_macro(
   rust_args : rust_global_args,
 )
 
+_libnak_rs_args = [
+  nouveau_rust_args,
+  # Otherwise, rustc trips up on -pthread
+  '-Clink-arg=-Wno-unused-command-line-argument',
+]
+# bevy-horizon: Switch builds turn some NAK_DEBUG flags on by default (api.rs)
+if host_machine.system() == 'horizon'
+  _libnak_rs_args += '--cfg=nak_switch_defaults'
+endif
+
 _libnak_rs = static_library(
   'nak_rs',
   files('nak/lib.rs'),
   gnu_symbol_visibility : 'hidden',
   rust_abi : 'c',
-  rust_args : [
-    nouveau_rust_args,
-    # Otherwise, rustc trips up on -pthread
-    '-Clink-arg=-Wno-unused-command-line-argument',
-  ],
+  rust_args : _libnak_rs_args,
   dependencies : [
     dep_paste,
     dep_rustc_hash,
