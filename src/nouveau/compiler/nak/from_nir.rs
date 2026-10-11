@@ -4453,11 +4453,13 @@ impl<'a> ShaderFromNir<'a> {
 
         if self.sm.sm() < 70 {
             if let Some(ni) = nb.following_if() {
-                let fb = ni.following_block();
-                b.push_op(OpSSy {
-                    target: self.get_block_label(fb),
-                });
-                self.push_crs(fb, SyncType::Sync);
+                if self.if_needs_sync(ni) {
+                    let fb = ni.following_block();
+                    b.push_op(OpSSy {
+                        target: self.get_block_label(fb),
+                    });
+                    self.push_crs(fb, SyncType::Sync);
+                }
             } else if let Some(nl) = nb.following_loop() {
                 let fb = nl.following_block();
                 b.push_op(OpPBk {
@@ -4583,10 +4585,18 @@ impl<'a> ShaderFromNir<'a> {
         self.parse_cf_list(ssa_alloc, phi_map, ni.iter_then_list());
         self.parse_cf_list(ssa_alloc, phi_map, ni.iter_else_list());
 
-        if self.sm.sm() < 70 {
+        if self.sm.sm() < 70 && self.if_needs_sync(ni) {
             let next_block = ni.cf_node.next().unwrap().as_block().unwrap();
             self.pop_crs(next_block, SyncType::Sync);
         }
+    }
+
+    /// Before Volta, whether an if needs SSY/SYNC to bring its threads back
+    /// together. With NAK_DEBUG=ubra, an if whose condition is the same in
+    /// every active thread (NIR's divergence analysis) can't split the warp,
+    /// so it branches with plain BRAs and leaves the CRS stack alone.
+    fn if_needs_sync(&self, ni: &nir_if) -> bool {
+        !DEBUG.ubra() || ni.condition.as_def().divergent
     }
 
     fn parse_loop(
