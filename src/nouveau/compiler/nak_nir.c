@@ -206,10 +206,12 @@ nak_optimize_nir(nir_shader *nir, const struct nak_compiler *nak)
 
       /* NAK_DEBUG=psel: before Volta every if is a real branch (SSY, BRA,
        * SYNC), so an if with up to 8 instructions on its sides becomes
-       * selects, from masseffect-nx's NVK patch.
+       * selects, from masseffect-nx's NVK patch. NAK_DEBUG=pselx takes ifs
+       * with up to 24, transcendentals (rsq, sqrt, log2, exp2) included.
        */
       nir_opt_peephole_select_options peephole_select_options = {
-         .limit = nak_debug_psel() ? 8 : 0,
+         .limit = nak_debug_pselx() ? 24 : nak_debug_psel() ? 8 : 0,
+         .expensive_alu_ok = nak_debug_pselx(),
          .discard_ok = true,
       };
       LOOP_OPT_NOT_IDEMPOTENT(nir, nir_opt_peephole_select,
