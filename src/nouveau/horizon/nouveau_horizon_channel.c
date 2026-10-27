@@ -1852,9 +1852,15 @@ nouveau_horizon_channel_exec_locked(
    const struct nouveau_horizon_exec *execs)
 {
    const uint32_t acquire_entries = channel->cache_acquire_emitted ? 0 : 2;
+   /* Leave room for the submission's tail too: submit_locked adds its fence
+    * and report entries (up to 2) and a cross-channel wait (1) after the
+    * final skid. Reserving the skid alone let a batch fill the GPFIFO to it,
+    * and the submit that followed failed with NO_SPACE, which NVK turns into
+    * a lost device. From masseffect-nx's NVK patch.
+    */
    enum nouveau_horizon_status status =
       nouveau_horizon_channel_reserve_entries_locked(
-         channel, exec_count + acquire_entries, 0);
+         channel, exec_count + acquire_entries, 3);
    if (status != NOUVEAU_HORIZON_SUCCESS)
       goto done;
 
