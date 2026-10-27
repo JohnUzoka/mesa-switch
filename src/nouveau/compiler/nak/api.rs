@@ -43,9 +43,10 @@ enum DebugFlags {
     Share,
     JThr,
     PSel,
+    TLat,
 }
 
-const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 21] = [
+const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 22] = [
     ("panic", DebugFlags::Panic),
     ("print", DebugFlags::Print),
     ("serial", DebugFlags::Serial),
@@ -67,15 +68,17 @@ const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 21] = [
     ("share", DebugFlags::Share),
     ("jthr", DebugFlags::JThr),
     ("psel", DebugFlags::PSel),
+    ("tlat", DebugFlags::TLat),
 ];
 
 /// The flags NAK_DEBUG starts from. Switch builds (meson sets
 /// nak_switch_defaults for horizon) start from the ones measured faster on the
 /// console, plus ofold, which saves instructions at the same register count,
-/// and psel, from masseffect-nx's NVK patch (not yet timed with Skate 3);
+/// and psel and tlat, from masseffect-nx's NVK patch (not yet timed with
+/// Skate 3);
 /// other builds start from none.
 #[cfg(nak_switch_defaults)]
-const DEFAULT_DEBUG_FLAGS: &str = "xbar,sink,remat,xbrk,lsink,plat,ofold,psel";
+const DEFAULT_DEBUG_FLAGS: &str = "xbar,sink,remat,xbrk,lsink,plat,ofold,psel,tlat";
 #[cfg(not(nak_switch_defaults))]
 const DEFAULT_DEBUG_FLAGS: &str = "";
 
@@ -211,6 +214,10 @@ pub trait GetDebugFlags {
 
     fn psel(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::PSel as u8) != 0
+    }
+
+    fn tlat(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::TLat as u8) != 0
     }
 }
 

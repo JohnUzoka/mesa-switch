@@ -1,6 +1,7 @@
 // Copyright © 2024 Valve Corporation
 // SPDX-License-Identifier: MIT
 
+use crate::api::{GetDebugFlags, DEBUG};
 use crate::ir::*;
 use compiler::cfg::CFG;
 use std::cmp::max;
@@ -254,6 +255,17 @@ pub fn estimate_block_weight(cfg: &CFG<BasicBlock>, block_idx: usize) -> u64 {
 /// Memory instructions were copied from L1 data cache latencies.
 /// For instructions not mentioned in the paper, I made up numbers.
 /// This could probably be improved.
+/// The latency the scheduler assumes for texture and memory ops: 200 cycles
+/// with NAK_DEBUG=tlat, else 32. Ipa and ALd share the memory ops' arm and
+/// are cheaper; overestimating them only places them earlier.
+fn memory_latency() -> u32 {
+    if DEBUG.tlat() {
+        200
+    } else {
+        32
+    }
+}
+
 pub fn estimate_variable_latency(sm: &ShaderModelInfo, op: &Op) -> u32 {
     if !sm.op_needs_scoreboard(op) {
         return 0;
@@ -283,13 +295,17 @@ pub fn estimate_variable_latency(sm: &ShaderModelInfo, op: &Op) -> u32 {
         // Uniform ops
         Op::Redux(_) | Op::R2UR(_) => 15,
 
-        // Texture ops
+        // Texture ops. NAK_DEBUG=tlat: on a GPU that shares LPDDR4 with the
+        // CPU (the Switch's GM20B), a texture miss takes hundreds of cycles,
+        // so the scheduler separates samples from their uses further (from
+        // masseffect-nx's NVK patch). Only scheduling priority: the
+        // scoreboard barriers come from calc_instr_deps.rs.
         Op::Tex(_)
         | Op::Tld(_)
         | Op::Tld4(_)
         | Op::Tmml(_)
         | Op::Txd(_)
-        | Op::Txq(_) => 32,
+        | Op::Txq(_) => memory_latency(),
 
         // Surface ops
         Op::SuLd(_)
@@ -314,7 +330,7 @@ pub fn estimate_variable_latency(sm: &ShaderModelInfo, op: &Op) -> u32 {
         | Op::Ipa(_)
         | Op::CCtl(_)
         | Op::LdTram(_)
-        | Op::MemBar(_) => 32,
+        | Op::MemBar(_) => memory_latency(),
 
         // Control-flow ops
         Op::WarpSync(_) => 16,
