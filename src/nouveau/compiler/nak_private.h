@@ -19,6 +19,7 @@ bool nak_debug_no_ugpr(void);
 bool nak_debug_sink(void);
 bool nak_debug_remat(void);
 bool nak_debug_lsink(void);
+bool nak_debug_ofold(void);
 
 struct nak_compiler {
    uint8_t sm;

@@ -80,15 +80,15 @@ nvk_physical_device_compiler_flags(const struct nvk_physical_device *pdev)
    /* NAK_GPR_LIMIT changes the code, so it keys the shader cache too. */
    uint64_t nak_gpr_limit = nak_debug_gpr_limit(pdev->nak);
 
-   assert(nak_flags <= UINT16_MAX);
+   assert(nak_flags <= UINT32_MAX);
    assert(nak_gpr_limit <= UINT8_MAX);
 
    return (no_cbufs ? 1 << 12 : 0)
       | (use_edb_buffer_views ? 1 << 13 : 0)
       | (instance->drirc.misc.ssbo_align_4b ? 1 << 14 : 0)
-      | (UINT64_C(10) << 16) /* Compiler ABI revision. */
+      | (UINT64_C(11) << 16) /* Compiler ABI revision. */
       | (nak_gpr_limit << 24)
-      | (nak_flags << 48);
+      | (nak_flags << 32);
 }
 
 static const nir_shader_compiler_options *

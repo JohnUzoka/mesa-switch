@@ -38,9 +38,10 @@ enum DebugFlags {
     XBrk,
     LSink,
     PLat,
+    OFold,
 }
 
-const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 16] = [
+const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 17] = [
     ("panic", DebugFlags::Panic),
     ("print", DebugFlags::Print),
     ("serial", DebugFlags::Serial),
@@ -57,13 +58,15 @@ const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 16] = [
     ("xbrk", DebugFlags::XBrk),
     ("lsink", DebugFlags::LSink),
     ("plat", DebugFlags::PLat),
+    ("ofold", DebugFlags::OFold),
 ];
 
 /// The flags NAK_DEBUG starts from. Switch builds (meson sets
 /// nak_switch_defaults for horizon) start from the ones measured faster on the
-/// console; other builds start from none.
+/// console, plus ofold, which saves instructions at the same register count;
+/// other builds start from none.
 #[cfg(nak_switch_defaults)]
-const DEFAULT_DEBUG_FLAGS: &str = "xbar,sink,remat,xbrk,lsink,plat";
+const DEFAULT_DEBUG_FLAGS: &str = "xbar,sink,remat,xbrk,lsink,plat,ofold";
 #[cfg(not(nak_switch_defaults))]
 const DEFAULT_DEBUG_FLAGS: &str = "";
 
@@ -180,6 +183,10 @@ pub trait GetDebugFlags {
     fn plat(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::PLat as u8) != 0
     }
+
+    fn ofold(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::OFold as u8) != 0
+    }
 }
 
 pub static DEBUG: OnceLock<Debug> = OnceLock::new();
@@ -260,6 +267,11 @@ pub extern "C" fn nak_debug_remat() -> bool {
 #[no_mangle]
 pub extern "C" fn nak_debug_lsink() -> bool {
     DEBUG.lsink()
+}
+
+#[no_mangle]
+pub extern "C" fn nak_debug_ofold() -> bool {
+    DEBUG.ofold()
 }
 
 fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {

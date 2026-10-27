@@ -9,6 +9,7 @@
 #include "nir_xfb_info.h"
 
 #include "util/u_math.h"
+#include "util/hash_table.h"
 
 #define _OPT(pass_macro, ...) ({                         \
    bool this_progress = false;                           \
@@ -1334,6 +1335,192 @@ nak_nir_lower_load_store(nir_shader *nir, const struct nak_compiler *nak)
    return progress;
 }
 
+/* NAK_DEBUG=ofold: a storage buffer's address is its binding's 64-bit base
+ * plus the u2u64 of a 32-bit offset (nir_address_format_64bit_global_32bit_offset),
+ * and nir_opt_offsets can't look through the u2u64, so every field of a struct
+ * read through an index costs its own 64-bit add. This moves a constant term
+ * of the 32-bit offset past the u2u64, where nir_opt_offsets folds it into the
+ * access and the rest of the address can be shared between accesses.
+ *
+ * It assumes the 32-bit sum doesn't wrap. naga's clamped indices (bevy-horizon's
+ * BH_ROBUST_BUFFER_ACCESS=clamp, its default) keep every offset inside its
+ * binding, so there it can't. Without them, a sum that wraps reaches past the
+ * binding unless the shader's own index arithmetic wraps back inside it, as
+ * a[i + 2u] does with i = 0xfffffffe.
+ */
+static bool
+nak_nir_split_global_offset_impl(nir_builder *b, nir_intrinsic_instr *intr,
+                                 UNUSED void *data)
+{
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_global_nv:
+   case nir_intrinsic_store_global_nv:
+   case nir_intrinsic_global_atomic_nv:
+   case nir_intrinsic_global_atomic_swap_nv:
+      break;
+   default:
+      return false;
+   }
+
+   nir_src *addr_src = nir_get_io_offset_src(intr);
+   if (addr_src->ssa->bit_size != 64)
+      return false;
+
+   nir_scalar addr = nir_scalar_resolved(addr_src->ssa, 0);
+   if (!nir_scalar_is_alu(addr) || nir_scalar_alu_op(addr) != nir_op_iadd)
+      return false;
+
+   for (unsigned i = 0; i < 2; i++) {
+      nir_scalar wide = nir_scalar_chase_movs(nir_scalar_chase_alu_src(addr, i));
+      if (!nir_scalar_is_alu(wide) || nir_scalar_alu_op(wide) != nir_op_u2u64)
+         continue;
+
+      nir_scalar offset = nir_scalar_chase_movs(nir_scalar_chase_alu_src(wide, 0));
+      if (!nir_scalar_is_alu(offset) || nir_scalar_alu_op(offset) != nir_op_iadd)
+         continue;
+
+      for (unsigned j = 0; j < 2; j++) {
+         nir_scalar c = nir_scalar_chase_movs(nir_scalar_chase_alu_src(offset, j));
+         if (!nir_scalar_is_const(c))
+            continue;
+
+         /* Small and positive, so it fits the access's signed immediate. */
+         uint64_t imm = nir_scalar_as_uint(c);
+         if (imm == 0 || imm > 0x3fffff)
+            continue;
+
+         nir_scalar base = nir_scalar_chase_alu_src(addr, 1 - i);
+         nir_scalar rest = nir_scalar_chase_alu_src(offset, 1 - j);
+
+         b->cursor = nir_before_instr(&intr->instr);
+         nir_def *rest_addr = nir_iadd(b, nir_mov_scalar(b, base),
+                                       nir_u2u64(b, nir_mov_scalar(b, rest)));
+         nir_src_rewrite(addr_src, nir_iadd_imm(b, rest_addr, imm));
+         return true;
+      }
+   }
+
+   return false;
+}
+
+static bool
+nak_nir_split_global_offset(nir_shader *nir)
+{
+   return nir_shader_intrinsics_pass(nir, nak_nir_split_global_offset_impl,
+                                     nir_metadata_control_flow, NULL);
+}
+
+/* NAK_DEBUG=ofold, late: after nak_nir_split_global_offset, accesses share
+ * one 64-bit address, base + u2u64(offset), and CSE leaves it in the block
+ * that first needs it, where it holds two registers until the last access.
+ * This clones it, with its u2u64, into each block that uses it, so only the
+ * 32-bit offset stays live, as without ofold. A clone never goes into a loop
+ * the original is outside of. No CSE may run after this, which would merge
+ * the clones again.
+ */
+static nir_loop *
+nak_innermost_loop(nir_block *block)
+{
+   for (nir_cf_node *node = block->cf_node.parent; node; node = node->parent) {
+      if (node->type == nir_cf_node_loop)
+         return nir_cf_node_as_loop(node);
+   }
+   return NULL;
+}
+
+static bool
+nak_is_wide_u2u64(nir_def *def)
+{
+   return nir_def_instr(def)->type == nir_instr_type_alu &&
+          nir_def_as_alu(def)->op == nir_op_u2u64;
+}
+
+static bool
+nak_is_split_global_addr(nir_def *def)
+{
+   if (def->bit_size != 64 || def->num_components != 1 ||
+       nir_def_instr(def)->type != nir_instr_type_alu)
+      return false;
+
+   nir_alu_instr *alu = nir_def_as_alu(def);
+   return alu->op == nir_op_iadd &&
+          (nak_is_wide_u2u64(alu->src[0].src.ssa) ||
+           nak_is_wide_u2u64(alu->src[1].src.ssa));
+}
+
+static nir_def *
+nak_clone_alu(nir_builder *b, nir_def *def)
+{
+   nir_alu_instr *clone = nir_alu_instr_clone(b->shader, nir_def_as_alu(def));
+   nir_builder_instr_insert(b, &clone->instr);
+   return &clone->def;
+}
+
+static bool
+nak_nir_rematerialize_global_addrs(nir_shader *nir)
+{
+   bool progress = false;
+   struct hash_table *remap = _mesa_pointer_hash_table_create(NULL);
+
+   nir_foreach_function_impl(impl, nir) {
+      bool impl_progress = false;
+      nir_builder b = nir_builder_create(impl);
+
+      nir_foreach_block(block, impl) {
+         _mesa_hash_table_clear(remap, NULL);
+         nir_loop *loop = nak_innermost_loop(block);
+
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            switch (intr->intrinsic) {
+            case nir_intrinsic_load_global_nv:
+            case nir_intrinsic_store_global_nv:
+            case nir_intrinsic_global_atomic_nv:
+            case nir_intrinsic_global_atomic_swap_nv:
+               break;
+            default:
+               continue;
+            }
+
+            nir_src *addr = nir_get_io_offset_src(intr);
+            nir_def *def = addr->ssa;
+            if (nir_def_block(def) == block || !nak_is_split_global_addr(def) ||
+                nak_innermost_loop(nir_def_block(def)) != loop)
+               continue;
+
+            struct hash_entry *entry = _mesa_hash_table_search(remap, def);
+            nir_def *clone = entry ? entry->data : NULL;
+            if (clone == NULL) {
+               b.cursor = nir_before_instr(instr);
+               nir_alu_instr *add = nir_def_as_alu(def);
+               nir_def *wide[2] = { NULL, NULL };
+               for (unsigned i = 0; i < 2; i++) {
+                  if (nak_is_wide_u2u64(add->src[i].src.ssa))
+                     wide[i] = nak_clone_alu(&b, add->src[i].src.ssa);
+               }
+               clone = nak_clone_alu(&b, def);
+               for (unsigned i = 0; i < 2; i++) {
+                  if (wide[i] != NULL)
+                     nir_src_rewrite(&nir_def_as_alu(clone)->src[i].src, wide[i]);
+               }
+               _mesa_hash_table_insert(remap, def, clone);
+            }
+
+            nir_src_rewrite(addr, clone);
+            impl_progress = true;
+         }
+      }
+
+      progress |= nir_progress(impl_progress, impl, nir_metadata_control_flow);
+   }
+
+   _mesa_hash_table_destroy(remap, NULL);
+   return progress;
+}
+
 static bool
 nak_nir_opt_uniform_address_impl(struct nir_builder *b,
                                  nir_intrinsic_instr *intr, void *cb_data)
@@ -1974,6 +2161,9 @@ nak_postprocess_nir(nir_shader *nir,
    if (OPT(nir, nak_nir_lower_load_store, nak))
       OPT(nir, nir_opt_constant_folding);
 
+   if (nak_debug_ofold())
+      OPT(nir, nak_nir_split_global_offset);
+
    struct nir_opt_offsets_options nak_offset_options = {
       .max_offset_cb = nak_nir_max_imm_offset,
       .cb_data = nak,
@@ -2026,6 +2216,9 @@ nak_postprocess_nir(nir_shader *nir,
     * Nothing after this point runs CSE, which would merge the clones again.
     */
    if (nak_debug_remat() && OPT(nir, nak_nir_rematerialize_bools))
+      OPT(nir, nir_opt_dce);
+
+   if (nak_debug_ofold() && OPT(nir, nak_nir_rematerialize_global_addrs))
       OPT(nir, nir_opt_dce);
 
    OPT(nir, nir_opt_move, nir_move_comparisons | nir_move_load_ubo);
