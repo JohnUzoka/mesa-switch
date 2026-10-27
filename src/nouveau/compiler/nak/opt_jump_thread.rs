@@ -73,7 +73,11 @@ fn jump_thread(func: &mut Function) -> bool {
         let block_label = func.blocks[i].label;
         match &func.blocks[i].instrs[..] {
             [instr] => {
-                if instr.is_branch_always_taken() {
+                // Before Volta a lone SYNC, BRK or CONT always branches too,
+                // but it pops the CRS stack, so it can't stand in for a BRA.
+                if instr.is_branch_always_taken()
+                    && matches!(instr.op, Op::Bra(_) | Op::Exit(_))
+                {
                     // Upholds invariant 2 because we updated the branch above
                     replacements.insert(block_label, clone_branch(&instr.op));
                 }
@@ -127,6 +131,12 @@ fn rewrite_cfg(func: &mut Function) {
                     builder.add_edge(block.label, bra.target);
                 }
                 Op::Exit(_) => (),
+                // Before Volta, the jump to the target the CRS stack holds
+                Op::Sync(OpSync { target })
+                | Op::Brk(OpBrk { target })
+                | Op::Cont(OpCont { target }) => {
+                    builder.add_edge(block.label, *target);
+                }
                 _ => unreachable!(),
             };
         }
@@ -170,6 +180,20 @@ impl Shader<'_> {
     pub fn opt_jump_thread(&mut self) {
         for f in &mut self.functions {
             f.opt_jump_thread();
+        }
+    }
+
+    /// Jump threading before Volta (NAK_DEBUG=jthr), after opt_crs.
+    ///
+    /// With NAK_DEBUG=ubra a uniform if branches with plain BRAs, which leave
+    /// branches to the next block and blocks that only branch on. Only BRAs
+    /// and EXITs move: SYNC, BRK and CONT keep their targets, so the CRS
+    /// stack is pushed and popped as before. Branches to the next block go
+    /// whether or not anything was threaded.
+    pub fn opt_jump_thread_pre_volta(&mut self) {
+        for f in &mut self.functions {
+            jump_thread(f);
+            opt_fall_through(f);
         }
     }
 }

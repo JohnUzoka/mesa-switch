@@ -41,9 +41,10 @@ enum DebugFlags {
     OFold,
     WgBar,
     Share,
+    JThr,
 }
 
-const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 19] = [
+const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 20] = [
     ("panic", DebugFlags::Panic),
     ("print", DebugFlags::Print),
     ("serial", DebugFlags::Serial),
@@ -63,6 +64,7 @@ const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 19] = [
     ("ofold", DebugFlags::OFold),
     ("wgbar", DebugFlags::WgBar),
     ("share", DebugFlags::Share),
+    ("jthr", DebugFlags::JThr),
 ];
 
 /// The flags NAK_DEBUG starts from. Switch builds (meson sets
@@ -198,6 +200,10 @@ pub trait GetDebugFlags {
 
     fn share(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::Share as u8) != 0
+    }
+
+    fn jthr(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::JThr as u8) != 0
     }
 }
 
@@ -722,6 +728,9 @@ fn nak_compile_shader_internal(
         pass!(s, opt_jump_thread);
     } else {
         pass!(s, opt_crs);
+        if DEBUG.jthr() {
+            pass!(s, opt_jump_thread_pre_volta);
+        }
     }
 
     s.remove_annotations();
