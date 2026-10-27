@@ -123,6 +123,20 @@ wsi_switch_get_format_info(VkFormat format,
    }
 }
 
+/* bevy-horizon: the swapchain's image count, which bevy_horizon (compat.rs) raises above 3
+ * when the NWindow has had another producer first. After a libnx framebuffer on the window, one of
+ * its slots never came back to the next producer, so with three images the game's swapchain went
+ * through two and the CPU and GPU took turns (sk8 findings 59 §19). Read as each swapchain is made.
+ */
+extern uint32_t bh_wsi_switch_image_count;
+
+static uint32_t
+wsi_switch_image_count(void)
+{
+   const uint32_t count = __atomic_load_n(&bh_wsi_switch_image_count, __ATOMIC_ACQUIRE);
+   return count < 3 ? 3 : count > 8 ? 8 : count;
+}
+
 static VkResult
 wsi_switch_surface_get_capabilities(VkIcdSurfaceBase *icd_surface,
                                     struct wsi_device *wsi_device,
@@ -135,12 +149,12 @@ wsi_switch_surface_get_capabilities(VkIcdSurfaceBase *icd_surface,
    if (nw && nwindowIsValid(nw))
       nwindowGetDimensions(nw, &width, &height);
 
-   /* NWindow permits one dequeued slot. Pin imageCount == minImageCount ==
-    * 3 so Vulkan's imageCount - minImageCount + 1 acquire allowance is
-    * one.
+   /* NWindow permits one dequeued slot. Pin imageCount == minImageCount
+    * (3, or bevy_horizon's count) so Vulkan's imageCount - minImageCount + 1
+    * acquire allowance is one.
     */
-   caps->minImageCount = 3;
-   caps->maxImageCount = 3;
+   caps->minImageCount = wsi_switch_image_count();
+   caps->maxImageCount = caps->minImageCount;
 
    caps->currentExtent = (VkExtent2D) { width, height };
    caps->minImageExtent = (VkExtent2D) { 1, 1 };
@@ -1069,10 +1083,10 @@ wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 
    const VkPresentModeKHR present_mode =
       wsi_swapchain_get_present_mode(wsi_device, pCreateInfo);
-   /* Match the advertised fixed three-image count and single concurrent
+   /* Match the advertised fixed image count and single concurrent
     * acquire. Stable slots also support FIFO/IMMEDIATE transitions.
     */
-   const uint32_t num_images = 3;
+   const uint32_t num_images = wsi_switch_image_count();
 
    size_t size = sizeof(*chain) + num_images * sizeof(chain->images[0]);
    chain = vk_zalloc(pAllocator, size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
