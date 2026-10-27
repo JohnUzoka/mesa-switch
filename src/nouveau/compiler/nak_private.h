@@ -23,6 +23,7 @@ bool nak_debug_ofold(void);
 bool nak_debug_wgbar(void);
 bool nak_debug_psel(void);
 bool nak_debug_pselx(void);
+bool nak_debug_hzero(void);
 
 struct nak_compiler {
    uint8_t sm;

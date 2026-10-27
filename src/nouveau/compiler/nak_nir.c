@@ -1344,6 +1344,84 @@ nak_nir_lower_load_store(nir_shader *nir, const struct nak_compiler *nak)
    return progress;
 }
 
+/* NAK_DEBUG=hzero: a fragment shader's helper lanes load nothing from global
+ * memory on Horizon: the GPU lets them only once bit 3 of
+ * gr_gpcs_tpcs_sm_disp_ctrl is clear, and Horizon gives NVK no way to write
+ * that register (nvk_cmd_draw.c skips its SET_PRIV_REG there).  A helper
+ * lane's LDG leaves the destination holding whatever its register held
+ * before.  Storage buffers are global memory, so a loop whose bounds a helper
+ * lane loads from one, like Bevy's clustered light loops, can run on in that
+ * lane long after the quad's other lanes are done, until the channel times
+ * out.  With hzero, helper lanes take zero from every global load instead, so
+ * such a loop runs no iterations in them.  A helper lane's values reach the
+ * other lanes only through derivatives, which a stale register spoils as
+ * surely as a zero.
+ *
+ * A demote makes the lane a helper from there on, so in a shader with one,
+ * each load reads the lane's state where it runs; without one, the shader
+ * reads it once.
+ */
+static bool
+nak_nir_zero_helper_global_loads(nir_shader *nir)
+{
+   if (nir->info.stage != MESA_SHADER_FRAGMENT)
+      return false;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   bool has_load = false, has_demote = false;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+
+         switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+         case nir_intrinsic_load_global_nv:
+            has_load = true;
+            break;
+         case nir_intrinsic_demote:
+         case nir_intrinsic_demote_if:
+            has_demote = true;
+            break;
+         default:
+            break;
+         }
+      }
+   }
+   if (!has_load)
+      return nir_no_progress(impl);
+
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_def *shader_live = NULL;
+   if (!has_demote) {
+      nir_def *killed = nak_nir_load_sysval(&b, NAK_SV_THREAD_KILL, 0);
+      shader_live = nir_ieq_imm(&b, killed, 0);
+   }
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_load_global_nv)
+            continue;
+
+         b.cursor = nir_after_instr(instr);
+         nir_def *live = shader_live;
+         if (live == NULL) {
+            nir_def *killed = nak_nir_load_sysval(&b, NAK_SV_THREAD_KILL, 0);
+            live = nir_ieq_imm(&b, killed, 0);
+         }
+         nir_def *zero = nir_imm_zero(&b, intr->def.num_components,
+                                      intr->def.bit_size);
+         nir_def *res = nir_bcsel(&b, live, &intr->def, zero);
+         nir_def_rewrite_uses_after(&intr->def, res);
+      }
+   }
+
+   return nir_progress(true, impl, nir_metadata_control_flow);
+}
+
 /* NAK_DEBUG=ofold: a storage buffer's address is its binding's 64-bit base
  * plus the u2u64 of a 32-bit offset (nir_address_format_64bit_global_32bit_offset),
  * and nir_opt_offsets can't look through the u2u64, so every field of a struct
@@ -2169,6 +2247,8 @@ nak_postprocess_nir(nir_shader *nir,
 
    if (OPT(nir, nak_nir_lower_load_store, nak))
       OPT(nir, nir_opt_constant_folding);
+   if (nak_debug_hzero())
+      OPT(nir, nak_nir_zero_helper_global_loads);
 
    if (nak_debug_ofold())
       OPT(nir, nak_nir_split_global_offset);
