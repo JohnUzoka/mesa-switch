@@ -39,9 +39,10 @@ enum DebugFlags {
     LSink,
     PLat,
     OFold,
+    WgBar,
 }
 
-const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 17] = [
+const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 18] = [
     ("panic", DebugFlags::Panic),
     ("print", DebugFlags::Print),
     ("serial", DebugFlags::Serial),
@@ -59,6 +60,7 @@ const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 17] = [
     ("lsink", DebugFlags::LSink),
     ("plat", DebugFlags::PLat),
     ("ofold", DebugFlags::OFold),
+    ("wgbar", DebugFlags::WgBar),
 ];
 
 /// The flags NAK_DEBUG starts from. Switch builds (meson sets
@@ -187,6 +189,10 @@ pub trait GetDebugFlags {
     fn ofold(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::OFold as u8) != 0
     }
+
+    fn wgbar(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::WgBar as u8) != 0
+    }
 }
 
 pub static DEBUG: OnceLock<Debug> = OnceLock::new();
@@ -272,6 +278,11 @@ pub extern "C" fn nak_debug_lsink() -> bool {
 #[no_mangle]
 pub extern "C" fn nak_debug_ofold() -> bool {
     DEBUG.ofold()
+}
+
+#[no_mangle]
+pub extern "C" fn nak_debug_wgbar() -> bool {
+    DEBUG.wgbar()
 }
 
 fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {

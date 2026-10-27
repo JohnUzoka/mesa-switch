@@ -855,8 +855,11 @@ nak_nir_remove_barrier_intrin(nir_builder *b, nir_intrinsic_instr *barrier,
    assert(exec_scope <= SCOPE_WORKGROUP &&
           "Control barrier with scope > WORKGROUP");
 
+   /* NAK_DEBUG=wgbar keeps the barrier of a one-warp workgroup, for emulators
+    * that run a warp's threads as more than one host subgroup.
+    */
    if (exec_scope == SCOPE_WORKGROUP &&
-       nak_nir_workgroup_has_one_subgroup(b->shader))
+       nak_nir_workgroup_has_one_subgroup(b->shader) && !nak_debug_wgbar())
       exec_scope = SCOPE_SUBGROUP;
 
    /* Because we're guaranteeing maximal convergence via warp barriers,
