@@ -40,9 +40,10 @@ enum DebugFlags {
     PLat,
     OFold,
     WgBar,
+    Share,
 }
 
-const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 18] = [
+const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 19] = [
     ("panic", DebugFlags::Panic),
     ("print", DebugFlags::Print),
     ("serial", DebugFlags::Serial),
@@ -61,6 +62,7 @@ const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 18] = [
     ("plat", DebugFlags::PLat),
     ("ofold", DebugFlags::OFold),
     ("wgbar", DebugFlags::WgBar),
+    ("share", DebugFlags::Share),
 ];
 
 /// The flags NAK_DEBUG starts from. Switch builds (meson sets
@@ -192,6 +194,10 @@ pub trait GetDebugFlags {
 
     fn wgbar(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::WgBar as u8) != 0
+    }
+
+    fn share(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::Share as u8) != 0
     }
 }
 
