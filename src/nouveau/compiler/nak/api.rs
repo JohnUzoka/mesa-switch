@@ -42,9 +42,10 @@ enum DebugFlags {
     WgBar,
     Share,
     JThr,
+    PSel,
 }
 
-const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 20] = [
+const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 21] = [
     ("panic", DebugFlags::Panic),
     ("print", DebugFlags::Print),
     ("serial", DebugFlags::Serial),
@@ -65,14 +66,16 @@ const DEBUG_FLAG_NAMES: [(&str, DebugFlags); 20] = [
     ("wgbar", DebugFlags::WgBar),
     ("share", DebugFlags::Share),
     ("jthr", DebugFlags::JThr),
+    ("psel", DebugFlags::PSel),
 ];
 
 /// The flags NAK_DEBUG starts from. Switch builds (meson sets
 /// nak_switch_defaults for horizon) start from the ones measured faster on the
-/// console, plus ofold, which saves instructions at the same register count;
+/// console, plus ofold, which saves instructions at the same register count,
+/// and psel, from masseffect-nx's NVK patch (not yet timed with Skate 3);
 /// other builds start from none.
 #[cfg(nak_switch_defaults)]
-const DEFAULT_DEBUG_FLAGS: &str = "xbar,sink,remat,xbrk,lsink,plat,ofold";
+const DEFAULT_DEBUG_FLAGS: &str = "xbar,sink,remat,xbrk,lsink,plat,ofold,psel";
 #[cfg(not(nak_switch_defaults))]
 const DEFAULT_DEBUG_FLAGS: &str = "";
 
@@ -205,6 +208,10 @@ pub trait GetDebugFlags {
     fn jthr(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::JThr as u8) != 0
     }
+
+    fn psel(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::PSel as u8) != 0
+    }
 }
 
 pub static DEBUG: OnceLock<Debug> = OnceLock::new();
@@ -295,6 +302,11 @@ pub extern "C" fn nak_debug_ofold() -> bool {
 #[no_mangle]
 pub extern "C" fn nak_debug_wgbar() -> bool {
     DEBUG.wgbar()
+}
+
+#[no_mangle]
+pub extern "C" fn nak_debug_psel() -> bool {
+    DEBUG.psel()
 }
 
 fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
