@@ -180,6 +180,93 @@ nvk_preprocess_nir(struct vk_physical_device *vk_pdev,
    }
 }
 
+/* NVK_SWITCH_DEAD_COLOR (on by default): a fragment shader's writes to color
+ * attachments the pipeline doesn't have are removed, so dead code elimination
+ * removes what only fed them. Vulkan discards those writes anyway. From
+ * masseffect-nx's NVK patch.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(nvk_switch_dead_color, "NVK_SWITCH_DEAD_COLOR", true)
+
+/* The color attachments the pipeline has, as a mask of locations, or all of
+ * them without its render pass state (shader objects, pipeline libraries) or
+ * with NVK_SWITCH_DEAD_COLOR=0. Its shaders' binaries depend on it, so it is
+ * hashed with them.
+ */
+static uint32_t
+nvk_color_rt_mask(const struct vk_graphics_pipeline_state *state)
+{
+   if (!debug_get_option_nvk_switch_dead_color() ||
+       state == NULL || state->rp == NULL ||
+       BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_COLOR_ATTACHMENT_MAP))
+      return ~0u;
+
+   uint32_t mask = 0;
+   for (uint32_t i = 0; i < state->rp->color_attachment_count; i++) {
+      /* An output's location is its attachment's only through the identity
+       * map, which is also what NVK draws with when there is no map.
+       */
+      if (state->cal != NULL && state->cal->color_map[i] != i)
+         return ~0u;
+      if (state->rp->color_attachment_formats[i] != VK_FORMAT_UNDEFINED)
+         mask |= BITFIELD_BIT(i);
+   }
+
+   /* Alpha-to-coverage reads location 0's alpha with or without a color
+    * attachment there.
+    */
+   if (state->ms == NULL || state->ms->alpha_to_coverage_enable ||
+       BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_ALPHA_TO_COVERAGE_ENABLE))
+      mask |= BITFIELD_BIT(0);
+
+   return mask;
+}
+
+static bool
+nvk_remove_dead_color_instr(nir_builder *b, nir_intrinsic_instr *intr,
+                            void *data)
+{
+   const uint32_t rt_mask = *(const uint32_t *)data;
+
+   if (intr->intrinsic != nir_intrinsic_store_deref)
+      return false;
+
+   nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
+   if (deref == NULL)
+      return false;
+
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   if (var == NULL || var->data.mode != nir_var_shader_out)
+      return false;
+
+   /* Only the locations of color attachments, at index 0: gl_FragColor (which
+    * goes to all of them) and dual-source blending's second output stay.
+    */
+   if (var->data.location < FRAG_RESULT_DATA0 || var->data.index != 0)
+      return false;
+
+   const unsigned rt = var->data.location - FRAG_RESULT_DATA0;
+   if (rt >= 32 || (rt_mask & BITFIELD_BIT(rt)))
+      return false;
+
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
+static void
+nvk_remove_dead_color(nir_shader *nir, uint32_t rt_mask)
+{
+   if (nir->info.stage != MESA_SHADER_FRAGMENT || rt_mask == ~0u)
+      return;
+
+   bool progress = false;
+   NIR_PASS(progress, nir, nir_shader_intrinsics_pass,
+            nvk_remove_dead_color_instr, nir_metadata_control_flow, &rt_mask);
+   if (progress) {
+      NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_shader_out, NULL);
+      NIR_PASS(_, nir, nir_opt_dce);
+   }
+}
+
 static void
 nvk_populate_fs_key(struct nak_fs_key *key,
                     const struct vk_graphics_pipeline_state *state)
@@ -240,6 +327,12 @@ nvk_hash_state(struct vk_physical_device *device,
       struct nak_fs_key key;
       nvk_populate_fs_key(&key, state);
       _mesa_blake3_update(&blake3_ctx, &key, sizeof(key));
+
+      /* The binary depends on which color attachments exist
+       * (nvk_remove_dead_color).
+       */
+      const uint32_t rt_mask = nvk_color_rt_mask(state);
+      _mesa_blake3_update(&blake3_ctx, &rt_mask, sizeof(rt_mask));
 
       /* This doesn't impact the shader compile but it does go in the
        * nvk_shader and gets [de]serialized along with the binary so we
@@ -1232,6 +1325,7 @@ nvk_compile_shader(struct nvk_device *dev,
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       nvk_populate_fs_key(&fs_key_tmp, state);
       fs_key = &fs_key_tmp;
+      nvk_remove_dead_color(nir, nvk_color_rt_mask(state));
    }
 
    result = nvk_compile_nir(dev, nir, info->flags, info->robustness,
