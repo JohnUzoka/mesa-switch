@@ -10,6 +10,7 @@
 #include "util/cnd_monotonic.h"
 #include "util/os_time.h"
 #include "util/u_memory.h"
+#include "util/u_debug.h"
 #include "util/macros.h"
 #include "util/timespec.h"
 
@@ -381,6 +382,22 @@ nvkmd_switch_sync_peek_nvmultifence(struct vk_sync *sync, NvMultiFence *out)
    return true;
 }
 
+/* Copy the waits' completion into the signals without the CPU waiting.
+ *
+ * The WSI calls this for a present with no command buffers: the semaphores
+ * the app passed to vkQueuePresentKHR are the ones its submits signaled, so
+ * their native fences already say when the GPU is done with the image. The
+ * compositor can wait on those instead of the CPU doing it first.
+ *
+ * Merge every wait's fences, not just the first: bevy_horizon records the
+ * world and the HUD in separate submits, so a present waits on two
+ * semaphores, and a fast path that only handled one never fired - every
+ * present CPU-waited the frame it had just queued (nvFenceWait, 17.9% of
+ * main in the Switch profile). A point sync holds four fences and
+ * NvMultiFence carries four, so the merge is exact while the total fits;
+ * when it does not, or a wait is not a native fence, fall back to the CPU
+ * wait rather than dropping a fence.
+ */
 VkResult
 nvkmd_switch_sync_copy_payloads(struct vk_device *device,
                                 uint32_t wait_count,
@@ -391,19 +408,76 @@ nvkmd_switch_sync_copy_payloads(struct vk_device *device,
    if (signal_count == 0)
       return VK_SUCCESS;
 
-   if (wait_count == 1) {
+   NvMultiFence merged;
+   memset(&merged, 0, sizeof(merged));
+   bool merged_all = true;
+   uint32_t first_non_native = wait_count;
+
+   for (uint32_t i = 0; i < wait_count && merged_all; i++) {
       NvMultiFence fence;
 
-      if (nvkmd_switch_sync_peek_nvmultifence(waits[0].sync, &fence)) {
-         for (uint32_t i = 0; i < signal_count; i++) {
-            struct vk_sync *sync = signals[i].sync;
+      if (!nvkmd_switch_sync_peek_nvmultifence(waits[i].sync, &fence)) {
+         merged_all = false;
+         first_non_native = i;
+         break;
+      }
 
-            if (sync != NULL && nvkmd_switch_sync_is_nvfence(sync->type))
-               nvkmd_switch_sync_import_nvmultifence(sync, &fence);
+      for (uint32_t j = 0; j < fence.num_fences && merged_all; j++) {
+         if ((int32_t)fence.fences[j].id < 0)
+            continue;
+
+         bool duplicate = false;
+         for (uint32_t k = 0; k < merged.num_fences; k++) {
+            if (merged.fences[k].id == fence.fences[j].id &&
+                merged.fences[k].value == fence.fences[j].value) {
+               duplicate = true;
+               break;
+            }
+         }
+         if (duplicate)
+            continue;
+
+         if (merged.num_fences >= ARRAY_SIZE(merged.fences)) {
+            merged_all = false;
+            break;
          }
 
-         return vk_sync_signal_many(device, signal_count, signals);
+         merged.fences[merged.num_fences++] = fence.fences[j];
       }
+   }
+
+   if (merged_all) {
+      static bool merged_logged;
+      if (wait_count > 1 &&
+          !__atomic_exchange_n(&merged_logged, true, __ATOMIC_RELAXED)) {
+         _debug_printf("nvkmd-switch: copy_payloads merged %u native fences "
+                       "from %u waits into %u signals; the compositor will "
+                       "wait instead of the CPU\n",
+                       merged.num_fences, wait_count, signal_count);
+      }
+
+      for (uint32_t i = 0; i < signal_count; i++) {
+         struct vk_sync *sync = signals[i].sync;
+
+         if (sync != NULL && nvkmd_switch_sync_is_nvfence(sync->type))
+            nvkmd_switch_sync_import_nvmultifence(sync, &merged);
+      }
+
+      return vk_sync_signal_many(device, signal_count, signals);
+   }
+
+   /* One line, so the log says why a present still waits on the CPU: how
+    * many waits there were and whether one of them was not a native fence
+    * (a timeline semaphore, or a submit that has not completed yet).
+    */
+   static bool fallback_logged;
+   if (!__atomic_exchange_n(&fallback_logged, true, __ATOMIC_RELAXED)) {
+      _debug_printf("nvkmd-switch: copy_payloads falling back to a CPU wait: "
+                    "%u waits, %u signals, %s\n",
+                    wait_count, signal_count,
+                    first_non_native < wait_count ?
+                       "wait is not a native fence" :
+                       "more fences than one NvMultiFence holds");
    }
 
    VkResult result = vk_sync_wait_many(device, wait_count, waits, 0,
