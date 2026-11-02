@@ -133,6 +133,7 @@ nvk_init_debug_flags(struct nvk_instance *instance)
       { "gart", NVK_DEBUG_FORCE_GART },
       { "coherent", NVK_DEBUG_FORCE_COHERENT },
       { "no_compression", NVK_DEBUG_NO_COMPRESSION },
+      { "no_vertex_cbuf", NVK_DEBUG_NO_VERTEX_CBUF },
       { NULL, 0 },
    };
 
