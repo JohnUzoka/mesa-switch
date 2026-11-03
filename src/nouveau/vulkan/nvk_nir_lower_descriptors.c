@@ -61,7 +61,6 @@ struct lower_descriptors_ctx {
    bool clamp_desc_array_bounds;
    bool indirect_bind;
    bool has_task_shader;
-   bool vertex_cbufs;
    nir_address_format ubo_addr_format;
    nir_address_format ssbo_addr_format;
 
@@ -462,17 +461,11 @@ build_cbuf_map(nir_shader *nir, struct lower_descriptors_ctx *ctx)
    }
 
 #ifdef HAVE_SWITCH_PLATFORM
-   /* Horizon skips the setup for fragment helper global loads. Vertex
-    * shaders take their uniform buffers as cbufs too: their loads sit before
-    * every vertex's position (a terrain vertex waited on five global loads
-    * of its view matrix), against one descriptor fetch per bind.
-    * NVK_DEBUG=no_vertex_cbuf keeps them on global loads.
-    */
-   const bool switch_cbufs = ctx->dev_info->sm == 53 &&
-      (nir->info.stage == MESA_SHADER_FRAGMENT ||
-       (nir->info.stage == MESA_SHADER_VERTEX && ctx->vertex_cbufs));
+   /* Horizon skips the setup for fragment helper global loads. */
+   const bool fragment_cbufs = ctx->dev_info->sm == 53 &&
+                              nir->info.stage == MESA_SHADER_FRAGMENT;
 #else
-   const bool switch_cbufs = false;
+   const bool fragment_cbufs = false;
 #endif
 
    for (uint32_t i = 0; i < num_cbufs; i++) {
@@ -486,13 +479,12 @@ build_cbuf_map(nir_shader *nir, struct lower_descriptors_ctx *ctx)
          continue;
 
       /* Non-push descriptors need a non-prefetchable pushbuf fetch before
-       * Turing. Avoid it unless the Switch's fragment helper lanes require
-       * cbuf loads or a vertex shader's latency does.
+       * Turing. Avoid it unless fragment helper lanes require cbuf loads.
        */
       if (ctx->dev_info->cls_eng3d < TURING_A &&
           cbufs[i].key.type == NVK_CBUF_TYPE_UBO_DESC &&
           (debug_get_bool_option("NVK_SWITCH_NO_UBO_CBUF", false) ||
-           (!switch_cbufs && !cbuf_set_is_push(ctx, cbufs[i].key.desc_set))))
+           (!fragment_cbufs && !cbuf_set_is_push(ctx, cbufs[i].key.desc_set))))
          continue;
 
       ctx->cbuf_map->cbufs[ctx->cbuf_map->cbuf_count++] = cbufs[i].key;
@@ -1590,7 +1582,6 @@ nvk_nir_lower_descriptors(nir_shader *nir,
       .indirect_bind =
          shader_flags & VK_SHADER_CREATE_INDIRECT_BINDABLE_BIT_EXT,
       .has_task_shader = (shader_flags & VK_SHADER_CREATE_NO_TASK_SHADER_BIT_EXT) == 0,
-      .vertex_cbufs = !(pdev->debug_flags & NVK_DEBUG_NO_VERTEX_CBUF),
       .ssbo_addr_format = nvk_ssbo_addr_format(pdev, rs),
       .ubo_addr_format = nvk_ubo_addr_format(pdev, rs),
    };

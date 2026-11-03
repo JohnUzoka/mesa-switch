@@ -75,7 +75,6 @@ nvk_physical_device_compiler_flags(const struct nvk_physical_device *pdev)
 {
    const struct nvk_instance *instance = nvk_physical_device_instance(pdev);
    bool no_cbufs = pdev->debug_flags & NVK_DEBUG_NO_CBUF;
-   bool no_vertex_cbufs = pdev->debug_flags & NVK_DEBUG_NO_VERTEX_CBUF;
    bool use_edb_buffer_views = nvk_use_edb_buffer_views(pdev);
    uint64_t nak_flags = nak_debug_flags(pdev->nak);
    /* NAK_GPR_LIMIT changes the code, so it keys the shader cache too. */
@@ -87,8 +86,7 @@ nvk_physical_device_compiler_flags(const struct nvk_physical_device *pdev)
    return (no_cbufs ? 1 << 12 : 0)
       | (use_edb_buffer_views ? 1 << 13 : 0)
       | (instance->drirc.misc.ssbo_align_4b ? 1 << 14 : 0)
-      | (no_vertex_cbufs ? 1 << 15 : 0)
-      | (UINT64_C(12) << 16) /* Compiler ABI revision. */
+      | (UINT64_C(11) << 16) /* Compiler ABI revision. */
       | (nak_gpr_limit << 24)
       | (nak_flags << 32);
 }

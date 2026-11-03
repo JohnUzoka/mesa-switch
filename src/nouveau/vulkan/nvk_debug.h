@@ -45,11 +45,6 @@ enum nvk_debug {
 
    /* Disable image compression */
    NVK_DEBUG_NO_COMPRESSION = 1ull << 9,
-
-   /* Switch: vertex shaders read uniform buffers from global memory instead
-    * of cbufs, as before they took cbufs like fragment shaders
-    */
-   NVK_DEBUG_NO_VERTEX_CBUF = 1ull << 10,
 };
 
 enum nvk_experimental {
